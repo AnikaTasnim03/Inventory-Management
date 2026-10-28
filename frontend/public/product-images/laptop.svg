@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 220" role="img" aria-labelledby="title">
+  <title>Illustration of a laptop</title>
+  <rect width="320" height="220" rx="24" fill="#eef0ff"/>
+  <rect x="70" y="38" width="180" height="116" rx="10" fill="#303e59"/>
+  <rect x="82" y="50" width="156" height="92" rx="4" fill="#b9c9ed"/>
+  <path d="M46 164h228l16 18H30z" fill="#6558df"/>
+  <rect x="138" y="169" width="44" height="4" rx="2" fill="#d9dbff"/>
+</svg>

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 220" role="img" aria-labelledby="title">
+  <title>Illustration of an office chair</title>
+  <rect width="320" height="220" rx="24" fill="#f1edff"/>
+  <rect x="104" y="42" width="112" height="72" rx="22" fill="#6558df"/>
+  <path d="M94 111h132v28H94z" fill="#8176ec"/>
+  <path d="M160 139v42M111 188h98M129 181l-20 18M191 181l20 18" stroke="#303e59" stroke-width="9" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 220" role="img" aria-labelledby="title">
+  <title>Illustration of office paper</title>
+  <rect width="320" height="220" rx="24" fill="#fff5e8"/>
+  <path d="M91 48h116l34 34v91H91z" fill="#fff" stroke="#d98225" stroke-width="6"/>
+  <path d="M207 48v36h34" fill="#ffe2bb" stroke="#d98225" stroke-width="6" stroke-linejoin="round"/>
+  <path d="M118 118h94M118 139h72" stroke="#d98225" stroke-width="8" stroke-linecap="round"/>
+</svg>

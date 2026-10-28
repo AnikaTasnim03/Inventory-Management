@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 220" role="img" aria-labelledby="title">
+  <title>Illustration of a network switch</title>
+  <rect width="320" height="220" rx="24" fill="#e8f4ff"/>
+  <rect x="42" y="75" width="236" height="76" rx="12" fill="#17243a"/>
+  <rect x="62" y="94" width="40" height="14" rx="3" fill="#6558df"/>
+  <g fill="#6ed4b0">
+    <circle cx="132" cy="101" r="6"/><circle cx="156" cy="101" r="6"/><circle cx="180" cy="101" r="6"/><circle cx="204" cy="101" r="6"/><circle cx="228" cy="101" r="6"/>
+  </g>
+  <path d="M70 128h180" stroke="#71819c" stroke-width="5" stroke-linecap="round"/>
+</svg>

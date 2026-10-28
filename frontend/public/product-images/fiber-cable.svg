@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 220" role="img" aria-labelledby="title">
+  <title>Illustration of a fiber optic cable</title>
+  <rect width="320" height="220" rx="24" fill="#e8faf4"/>
+  <path d="M66 155c38-84 87-84 124-25 27 43 57 43 70-18" fill="none" stroke="#1c9a70" stroke-width="16" stroke-linecap="round"/>
+  <rect x="48" y="132" width="42" height="44" rx="7" fill="#17243a"/>
+  <rect x="230" y="91" width="42" height="44" rx="7" fill="#17243a"/>
+  <circle cx="69" cy="154" r="7" fill="#6ed4b0"/><circle cx="251" cy="113" r="7" fill="#6ed4b0"/>
+</svg>
