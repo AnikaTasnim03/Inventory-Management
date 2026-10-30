@@ -1,10 +1,33 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import { createCategory, deleteCategory as deleteCategoryFromApi, getCategories, updateCategory } from './categoryService'
 import { createProduct, deleteProduct as deleteProductFromApi, getProducts, updateProduct } from './productService'
 import { createSupplier, deleteSupplier as deleteSupplierFromApi, getSuppliers, updateSupplier } from './supplierService'
 import { createPurchaseOrder, getPurchaseOrders, receivePurchaseOrder, updatePurchaseOrder, updatePurchaseOrderStatus as updatePurchaseOrderStatusFromApi } from './purchaseOrderService'
 import { createStockMovementIdempotencyKey, getStockMovements, recordStockMovement } from './stockMovementService'
+import {
+  buildSourceNotifications,
+  createPurchaseOrderActivity,
+  deleteNotification,
+  markAllNotificationsRead,
+  markNotificationRead,
+  mergeNotificationState,
+  persistNotificationActivity,
+  readNotificationState,
+  writeNotificationState,
+} from './notificationsService'
+import {
+  buildMovementTimeSeries,
+  buildProductMovementSummary,
+  calculateInventoryMetrics,
+  calculateMovementTotals,
+  calculatePurchaseOrderAnalytics,
+  getProductInventoryValue,
+  getReportDateRange,
+  getReportStockStatus,
+  getValidProductQuantity,
+  isWithinReportDateRange,
+} from './reportAnalytics'
 const navigationItems = [
   { id: 'dashboard', label: 'Dashboard', icon: '▦' },
   { id: 'products', label: 'Products', icon: '□' },
@@ -64,9 +87,9 @@ const emptyPurchaseOrderForm = {
 }
 
 const emptyReportFilters = {
-  movementStart: '', movementEnd: '', movementProduct: 'all',
-  movementCategory: 'all', movementType: 'all', movementReference: '',
-  orderStart: '', orderEnd: '', orderSupplier: 'all', orderStatus: 'all',
+  dateRange: 'last-30-days', customStart: '', customEnd: '',
+  movementProduct: 'all', movementCategory: 'all', movementType: 'all',
+  movementReference: '', orderSupplier: 'all', orderStatus: 'all',
 }
 
 function getStockStatus(product) {
@@ -135,20 +158,6 @@ function parseDateSafely(value) {
   return Number.isNaN(date.getTime()) ? null : date
 }
 
-function isDateOnOrAfter(value, start) {
-  const date = parseDateSafely(value)
-  if (!start) return true
-  if (!date) return false
-  return date >= new Date(`${start}T00:00:00`)
-}
-
-function isDateOnOrBefore(value, end) {
-  const date = parseDateSafely(value)
-  if (!end) return true
-  if (!date) return false
-  return date <= new Date(`${end}T23:59:59.999`)
-}
-
 function csvCell(value, numeric = false) {
   const text = String(value ?? '')
   if (!numeric && /^[=+\-@]/.test(text)) return `"'${text.replaceAll('"', '""')}"`
@@ -185,7 +194,13 @@ function InventoryApp() {
   const [products, setProducts] = useState([])
   const [productsLoading, setProductsLoading] = useState(true)
   const [productLoadError, setProductLoadError] = useState('')
+  const [dashboardLoading, setDashboardLoading] = useState(true)
+  const [dashboardDataError, setDashboardDataError] = useState('')
+  const [reportsLoading, setReportsLoading] = useState(true)
+  const [reportsDataError, setReportsDataError] = useState('')
   const productRefreshVersionRef = useRef(0)
+  const dashboardRefreshVersionRef = useRef(0)
+  const dashboardRefreshPromiseRef = useRef(null)
   const [categoryRecords, setCategoryRecords] = useState(initialCategories)
   const [categoryLoadError, setCategoryLoadError] = useState('')
   const [suppliers, setSuppliers] = useState(initialSuppliers)
@@ -208,6 +223,7 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
   const [form, setForm] = useState(emptyForm)
   const [errors, setErrors] = useState({})
   const [successMessage, setSuccessMessage] = useState('')
+  const [notificationStorageError, setNotificationStorageError] = useState('')
   const [productSaveWarning, setProductSaveWarning] = useState('')
   const [productSubmitting, setProductSubmitting] = useState(false)
   const [movementForm, setMovementForm] = useState(emptyMovementForm)
@@ -249,6 +265,16 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
   const productDeleteRef = useRef(null)
   const supplierSubmitRef = useRef(false)
   const supplierDeleteRef = useRef(null)
+
+  function recordPurchaseOrderActivity(order, type, message) {
+    try {
+      persistNotificationActivity(createPurchaseOrderActivity({ order, type, message }))
+      setNotificationStorageError('')
+    } catch (error) {
+      console.error('Purchase order saved, but its notification could not be stored:', error)
+      setNotificationStorageError(error instanceof Error ? error.message : 'Unable to save the purchase-order notification in this browser.')
+    }
+  }
   useEffect(() => {
   function handlePopState() {
     const nextSupplierRoute = getSupplierRoute()
@@ -316,6 +342,7 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
   useEffect(() => {
     let cancelled = false
     const productRequestVersion = productRefreshVersionRef.current
+    const dashboardRequestVersion = dashboardRefreshVersionRef.current
     Promise.allSettled([getCategories(), getProducts(), getSuppliers(), getPurchaseOrders(), getStockMovements()])
       .then((results) => {
         if (cancelled) return
@@ -334,10 +361,32 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
           }
         }
         setProductsLoading(false)
+        setReportsLoading(false)
+        if (dashboardRequestVersion === dashboardRefreshVersionRef.current) {
+          setDashboardLoading(false)
+        }
         if (suppliersResult.status === 'fulfilled') setSuppliers(suppliersResult.value)
-        if (ordersResult.status === 'fulfilled') setPurchaseOrders(ordersResult.value)
-        if (movementsResult.status === 'fulfilled') setStockMovements(movementsResult.value)
+        if (dashboardRequestVersion === dashboardRefreshVersionRef.current) {
+          if (ordersResult.status === 'fulfilled') setPurchaseOrders(ordersResult.value)
+          if (movementsResult.status === 'fulfilled') setStockMovements(movementsResult.value)
+          const dashboardSourceResults = [
+            ['products', productsResult],
+            ['purchase orders', ordersResult],
+            ['stock movements', movementsResult],
+          ].filter(([, result]) => result.status === 'rejected')
+          setDashboardDataError(dashboardSourceResults.length
+            ? `Unable to load ${dashboardSourceResults.map(([name]) => name).join(', ')} from the backend. Retry the dashboard refresh after checking the connection.`
+            : '')
+        }
         const failedSources = results.filter((result) => result.status === 'rejected')
+        const reportSourceResults = [
+          ['products', productsResult],
+          ['purchase orders', ordersResult],
+          ['stock movements', movementsResult],
+        ].filter(([, result]) => result.status === 'rejected')
+        setReportsDataError(reportSourceResults.length
+          ? `Unable to load ${reportSourceResults.map(([name]) => name).join(', ')} from the backend. Refresh after checking the backend connection.`
+          : '')
         setCategoryLoadError(failedSources.length
           ? 'Some inventory data could not be loaded from Supabase. Check the backend connection before relying on displayed values.'
           : '')
@@ -363,6 +412,73 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
     }
   }
 
+  function refreshDashboardData() {
+    if (dashboardRefreshPromiseRef.current) return dashboardRefreshPromiseRef.current
+    setDashboardLoading(true)
+    setDashboardDataError('')
+    const requestVersion = ++dashboardRefreshVersionRef.current
+    productRefreshVersionRef.current += 1
+    const request = Promise.allSettled([getProducts(), getPurchaseOrders(), getStockMovements()])
+      .then((results) => {
+        if (requestVersion !== dashboardRefreshVersionRef.current) return false
+        const [productsResult, ordersResult, movementsResult] = results
+        if (productsResult.status === 'fulfilled') {
+          setProducts(productsResult.value)
+          setProductLoadError('')
+        } else {
+          setProductLoadError(productsResult.reason instanceof Error ? productsResult.reason.message : 'Unable to load products.')
+        }
+        if (ordersResult.status === 'fulfilled') setPurchaseOrders(ordersResult.value)
+        if (movementsResult.status === 'fulfilled') setStockMovements(movementsResult.value)
+        const failedSources = [
+          ['products', productsResult],
+          ['purchase orders', ordersResult],
+          ['stock movements', movementsResult],
+        ].filter(([, result]) => result.status === 'rejected')
+        setDashboardDataError(failedSources.length
+          ? `Unable to refresh ${failedSources.map(([name]) => name).join(', ')}. Successfully refreshed records remain visible; try again after checking the backend connection.`
+          : '')
+        return failedSources.length === 0
+      })
+      .finally(() => {
+        if (requestVersion === dashboardRefreshVersionRef.current) {
+          setDashboardLoading(false)
+          dashboardRefreshPromiseRef.current = null
+        }
+      })
+    dashboardRefreshPromiseRef.current = request
+    return request
+  }
+
+  async function refreshReportData() {
+    setReportsLoading(true)
+    setReportsDataError('')
+    const productRequestVersion = ++productRefreshVersionRef.current
+    const results = await Promise.allSettled([getProducts(), getPurchaseOrders(), getStockMovements()])
+    const [productsResult, ordersResult, movementsResult] = results
+    if (productsResult.status === 'fulfilled' && productRequestVersion === productRefreshVersionRef.current) {
+      setProducts(productsResult.value)
+      setProductLoadError('')
+    } else if (productsResult.status === 'rejected') {
+      setProductLoadError(productsResult.reason instanceof Error ? productsResult.reason.message : 'Unable to refresh products.')
+    }
+    if (ordersResult.status === 'fulfilled') setPurchaseOrders(ordersResult.value)
+    if (movementsResult.status === 'fulfilled') setStockMovements(movementsResult.value)
+    setReportsLoading(false)
+    const failedSources = [
+      ['products', productsResult],
+      ['purchase orders', ordersResult],
+      ['stock movements', movementsResult],
+    ].filter(([, result]) => result.status === 'rejected')
+    if (failedSources.length) {
+      const message = `Unable to refresh ${failedSources.map(([name]) => name).join(', ')}. Successfully refreshed sources are shown; retry to update all reports.`
+      setReportsDataError(message)
+      throw new Error(message)
+    }
+    setReportsDataError('')
+    return true
+  }
+
   const filteredProducts = filterProducts(products, {
     searchText: search,
     category: categoryFilter,
@@ -377,10 +493,6 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
       return sortDirection === 'asc' ? comparison : -comparison
     })
 
-  const totalUnits = products.reduce((total, product) => total + product.quantity, 0)
-  const inventoryValue = products.reduce((total, product) => total + product.quantity * product.price, 0)
-  const lowStockProducts = products.filter((product) => getStockStatus(product) === 'low')
-  const outOfStockProducts = products.filter((product) => getStockStatus(product) === 'out')
   const categoryOptions = categoryRecords.map((category) => category?.name).filter(Boolean)
   const productSupplierOptions = [...new Set(products
     .map((product) => product.supplier)
@@ -403,7 +515,8 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
 
   function handleNavigation(pageId) {
     if (pageId !== 'suppliers' && supplierRoute) clearSupplierRoute()
-    if (pageId === 'products' || pageId === 'stock') void refreshProducts()
+    if (pageId === 'dashboard') void refreshDashboardData()
+    else if (pageId === 'products' || pageId === 'stock') void refreshProducts()
     setActivePage(pageId)
     setIsSidebarOpen(false)
     setSelectedProduct(null)
@@ -746,6 +859,7 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
       setPurchaseOrders((current) => editingPurchaseOrder
         ? current.map((order) => order.id === editingPurchaseOrder.id ? savedOrder : order)
         : [...current, savedOrder])
+      if (editingPurchaseOrder) recordPurchaseOrderActivity(savedOrder, 'purchase-order-updated', `${savedOrder.orderNumber} was updated.`)
       setSuccessMessage(editingPurchaseOrder ? `${savedOrder.orderNumber} was updated successfully.` : 'Purchase order was created as a draft.')
       closePurchaseOrderForm()
     } catch (error) {
@@ -771,6 +885,13 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
       const savedOrder = await updatePurchaseOrderStatusFromApi(order.id, nextStatus)
       setPurchaseOrders((current) => current.map((item) => item.id === order.id ? savedOrder : item))
       setSelectedPurchaseOrder((current) => current?.id === order.id ? savedOrder : current)
+      recordPurchaseOrderActivity(
+        savedOrder,
+        savedOrder.status === 'Cancelled' ? 'purchase-order-cancelled' : 'purchase-order-updated',
+        savedOrder.status === 'Cancelled'
+          ? `${savedOrder.orderNumber} was cancelled.`
+          : `${savedOrder.orderNumber} was placed.`
+      )
       setSuccessMessage(`${order.orderNumber} is now ${savedOrder.status}.`)
     } catch (error) {
       console.error('Failed to update purchase order status:', error)
@@ -1076,9 +1197,9 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
         {successMessage && <div className="success-message" role="status">{successMessage}</div>}
         {productSaveWarning && <div className="error-message" role="alert">{productSaveWarning}</div>}
         {movementRefreshWarning && <div className="error-message" role="alert">{movementRefreshWarning}</div>}
-        {categoryLoadError && <div className="error-message" role="alert">{categoryLoadError}</div>}
-        {productLoadError && <div className="error-message" role="alert">Products could not be loaded: {productLoadError}</div>}
-        {productsLoading && <div className="loading-message" role="status">Loading products from the backend…</div>}
+        {!isDashboard && categoryLoadError && <div className="error-message" role="alert">{categoryLoadError}</div>}
+        {!isDashboard && productLoadError && <div className="error-message" role="alert">Products could not be loaded: {productLoadError}</div>}
+        {!isDashboard && productsLoading && <div className="loading-message" role="status">Loading products from the backend…</div>}
 
        {showForm && (isDashboard || isProducts) && (
   <ProductForm
@@ -1094,7 +1215,22 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
   />
 )}
 
-        {isDashboard && <Dashboard products={products} totalUnits={totalUnits} inventoryValue={inventoryValue} lowStockProducts={lowStockProducts} outOfStockProducts={outOfStockProducts} stockMovements={stockMovements} productAlertCount={productAlertCount} outstandingOrderCount={outstandingOrderCount} onProducts={() => handleNavigation('products')} onStock={() => handleNavigation('stock')} onNotifications={() => handleNavigation('notifications')} onView={setSelectedProduct} />}
+        {isDashboard && <Dashboard
+          products={products}
+          movements={stockMovements}
+          orders={purchaseOrders}
+          loading={dashboardLoading}
+          error={dashboardDataError}
+          onRefresh={refreshDashboardData}
+          onProducts={() => handleNavigation('products')}
+          onStock={() => handleNavigation('stock')}
+          onPurchaseOrders={() => handleNavigation('purchase-orders')}
+          onCategories={() => handleNavigation('categories')}
+          onSuppliers={() => handleNavigation('suppliers')}
+          onReports={() => handleNavigation('reports')}
+          onNotifications={() => handleNavigation('notifications')}
+          onViewProduct={(product) => navigateProductRoute(product.id, 'view')}
+        />}
 
         {isProducts && (
           <>
@@ -1126,8 +1262,40 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
         {activePage === 'categories' && <CategoryManagement categories={visibleCategories} search={categorySearch} setSearch={setCategorySearch} form={categoryForm} setForm={setCategoryForm} errors={categoryErrors} editingCategory={editingCategory} onSubmit={submitCategory} onEdit={editCategory} onDelete={deleteCategory} onCancel={resetCategoryForm} />}
         {activePage === 'suppliers' && <SupplierManagement suppliers={visibleSuppliers} products={products} categories={categoryOptions} search={supplierSearch} setSearch={setSupplierSearch} form={supplierForm} setForm={setSupplierForm} errors={supplierErrors} editingSupplier={editingSupplier} selectedSupplier={selectedSupplier} onSelect={(supplier) => supplier ? navigateSupplierRoute(supplier.id, 'view') : clearSupplierRoute()} showForm={showSupplierForm} onAdd={() => openSupplierForm()} onEdit={(supplier) => navigateSupplierRoute(supplier.id, 'edit')} onDelete={deleteSupplier} onSubmit={submitSupplier} onCancel={closeSupplierForm} />}
         {isPurchaseOrders && <PurchaseOrderManagement orders={visiblePurchaseOrders} allOrders={purchaseOrders} products={products} suppliers={suppliers} search={purchaseOrderSearch} setSearch={setPurchaseOrderSearch} statusFilter={purchaseOrderStatusFilter} setStatusFilter={setPurchaseOrderStatusFilter} form={purchaseOrderForm} setForm={setPurchaseOrderForm} errors={purchaseOrderErrors} editingOrder={editingPurchaseOrder} selectedOrder={selectedPurchaseOrder} showForm={showPurchaseOrderForm} receiveForm={receiveForm} setReceiveForm={setReceiveForm} receiveErrors={receiveErrors} receiveSubmitting={receiveSubmitting} onAdd={() => openPurchaseOrderForm()} onEdit={openPurchaseOrderForm} onSelect={setSelectedPurchaseOrder} onSubmit={submitPurchaseOrder} onCancel={closePurchaseOrderForm} onPlace={(order) => updatePurchaseOrderStatus(order, 'Ordered')} onCancelOrder={(order) => updatePurchaseOrderStatus(order, 'Cancelled')} onReceive={openReceiveForm} onReceiveSubmit={submitReceipt} onReceiveCancel={() => { setReceiveForm(null); setReceiveErrors({}) }} />}
-        {isReports && <Reports products={products} categories={categoryRecords} suppliers={suppliers} movements={stockMovements} orders={purchaseOrders} filters={reportFilters} setFilters={setReportFilters} />}
-        {isNotifications && <NotificationsPage products={notificationProducts} orders={awaitingPurchaseOrders} suppliers={suppliers} reorderQuantities={reorderQuantities} setReorderQuantities={setReorderQuantities} reorderSuppliers={reorderSuppliers} setReorderSuppliers={setReorderSuppliers} onProduct={(product) => { handleNavigation('products'); setSelectedProduct(product) }} onOrder={(order) => { handleNavigation('purchase-orders'); setSelectedPurchaseOrder(order) }} onCreateOrder={openPurchaseOrderFromRecommendation} />}
+        {isReports && <Reports
+          products={products}
+          categories={categoryRecords}
+          suppliers={suppliers}
+          movements={stockMovements}
+          orders={purchaseOrders}
+          filters={reportFilters}
+          setFilters={setReportFilters}
+          loading={reportsLoading}
+          dataError={reportsDataError}
+          onRefresh={refreshReportData}
+        />}
+        {isNotifications && <NotificationsPage
+          products={notificationProducts}
+          allProducts={products}
+          orders={purchaseOrders}
+          movements={stockMovements}
+          suppliers={suppliers}
+          reorderQuantities={reorderQuantities}
+          setReorderQuantities={setReorderQuantities}
+          reorderSuppliers={reorderSuppliers}
+          setReorderSuppliers={setReorderSuppliers}
+          storageError={notificationStorageError}
+          onClearStorageError={() => setNotificationStorageError('')}
+          onProduct={(product) => navigateProductRoute(product.id, 'view')}
+          onOrder={(order) => { handleNavigation('purchase-orders'); setSelectedPurchaseOrder(order) }}
+          onStockMovement={(notification) => {
+            handleNavigation('stock')
+            if (notification.destination?.productId) {
+              setMovementForm((current) => ({ ...current, productId: String(notification.destination.productId) }))
+            }
+          }}
+          onCreateOrder={openPurchaseOrderFromRecommendation}
+        />}
 
         {!isDashboard && !isProducts && activePage !== 'stock' && activePage !== 'categories' && activePage !== 'suppliers' && !isPurchaseOrders && !isReports && !isNotifications && <section className="planned-card"><span className="planned-icon">◌</span><h2>{activeItem.label} is planned</h2><p>This navigation item is visible for the future Inventra roadmap. It will become functional in a later implementation phase.</p></section>}
         <footer>Built with React · Demo data only</footer>
@@ -1138,31 +1306,345 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
 
 export default InventoryApp
 
-function Dashboard({ products, totalUnits, inventoryValue, lowStockProducts, outOfStockProducts, stockMovements, productAlertCount, outstandingOrderCount, onProducts, onStock, onNotifications, onView }) {
-  return (
-    <>
-      {(productAlertCount > 0 || outstandingOrderCount > 0) && <section className="attention-banner"><div><strong>Attention needed</strong><span>{productAlertCount} product alert{productAlertCount === 1 ? '' : 's'} · {outstandingOrderCount} purchase order{outstandingOrderCount === 1 ? '' : 's'} awaiting receipt</span></div><button className="secondary-button" onClick={onNotifications}>Review notifications</button></section>}
-      <section className="stats" aria-label="Inventory summary">
-        <StatCard icon="▦" color="purple" label="Total Products" value={products.length} detail="Unique products in inventory" />
-        <StatCard icon="▤" color="blue" label="Total Units in Stock" value={totalUnits} detail="Across all products" />
-        <StatCard icon="!" color="orange" label="Low Stock Items" value={lowStockProducts.length} detail="At or below reorder threshold" />
-        <StatCard icon="×" color="red" label="Out of Stock" value={outOfStockProducts.length} detail="Products needing replenishment" />
-        <StatCard icon="৳" color="green" label="Inventory Value" value={`৳${inventoryValue.toLocaleString('en-BD')}`} detail="Estimated value at listed prices" />
+function Dashboard({
+  products,
+  movements,
+  orders,
+  loading,
+  error,
+  onRefresh,
+  onProducts,
+  onStock,
+  onPurchaseOrders,
+  onCategories,
+  onSuppliers,
+  onReports,
+  onNotifications,
+  onViewProduct,
+}) {
+  const inventory = calculateInventoryMetrics(products)
+  const stockCounts = {
+    inStock: products.filter((product) => getReportStockStatus(product) === 'in-stock').length,
+    low: inventory.lowStockCount,
+    out: inventory.outOfStockCount,
+    unknown: products.filter((product) => getReportStockStatus(product) === 'unknown').length,
+  }
+  const orderAnalytics = calculatePurchaseOrderAnalytics(orders)
+  const dateRange = getReportDateRange('last-7-days', '', '')
+  const sortedMovements = [...movements]
+    .sort((first, second) => {
+      const firstDate = parseDateSafely(first.date)?.getTime() ?? 0
+      const secondDate = parseDateSafely(second.date)?.getTime() ?? 0
+      return secondDate - firstDate
+    })
+  const recentMovementRecords = sortedMovements.slice(0, 5)
+  const recentMovements = sortedMovements
+    .filter((movement) => isWithinReportDateRange(movement.date, dateRange))
+  const movementTrend = buildMovementTimeSeries(recentMovements, dateRange)
+  const recentOrders = [...orders]
+    .sort((first, second) => {
+      const firstDate = parseDateSafely(first.orderDate || first.createdAt)?.getTime() ?? 0
+      const secondDate = parseDateSafely(second.orderDate || second.createdAt)?.getTime() ?? 0
+      return secondDate - firstDate
+    })
+    .slice(0, 5)
+  const alerts = products
+    .filter((product) => ['low', 'out'].includes(getReportStockStatus(product)))
+    .sort((first, second) => {
+      const firstStatus = getReportStockStatus(first) === 'out' ? 0 : 1
+      const secondStatus = getReportStockStatus(second) === 'out' ? 0 : 1
+      return firstStatus - secondStatus
+        || (getValidProductQuantity(first) ?? 0) - (getValidProductQuantity(second) ?? 0)
+    })
+    .slice(0, 6)
+  const statusLabels = ['Draft', 'Ordered', 'Partially Received', 'Received', 'Cancelled']
+  const maxOrderCount = Math.max(...statusLabels.map((status) => orderAnalytics.statusCounts[status]), 1)
+  const initialEmptyLoading = loading && products.length === 0 && movements.length === 0 && orders.length === 0
+
+  return <section className="dashboard-page">
+    <section className="dashboard-navigation" aria-labelledby="dashboard-navigation-heading">
+      <div className="dashboard-section-heading">
+        <div>
+          <h2 id="dashboard-navigation-heading">Quick Navigation</h2>
+          <p>Open an inventory workspace or jump to the overview below.</p>
+        </div>
+      </div>
+      <DashboardNavigationTiles
+        onProducts={onProducts}
+        onStock={onStock}
+        onPurchaseOrders={onPurchaseOrders}
+        onCategories={onCategories}
+        onSuppliers={onSuppliers}
+        onNotifications={onNotifications}
+        onReports={onReports}
+      />
+    </section>
+
+    <section className="dashboard-analytics" id="dashboard-inventory-overview" aria-labelledby="dashboard-analytics-heading">
+      <div className="dashboard-section-heading dashboard-analytics-heading">
+        <div>
+          <h2 id="dashboard-analytics-heading">Inventory Analytics</h2>
+          <p>Current inventory and recent activity from your records.</p>
+        </div>
+        <button className="secondary-button" type="button" onClick={onRefresh} disabled={loading}>
+          {loading ? 'Updating…' : 'Refresh dashboard'}
+        </button>
+      </div>
+      {loading && <div className="dashboard-state loading" role="status">{initialEmptyLoading ? 'Loading dashboard data…' : 'Updating dashboard data…'}</div>}
+      {error && <div className="dashboard-state error" role="alert"><span>{error}</span><button className="secondary-button" type="button" onClick={onRefresh} disabled={loading}>Retry</button></div>}
+
+      {initialEmptyLoading ? null : <>
+      {(stockCounts.low + stockCounts.out > 0 || orderAnalytics.statusCounts.Ordered + orderAnalytics.statusCounts['Partially Received'] > 0) && (
+        <section className="attention-banner">
+          <div><strong>Attention needed</strong><span>{stockCounts.low + stockCounts.out} product(s) need replenishment · {orderAnalytics.statusCounts.Ordered + orderAnalytics.statusCounts['Partially Received']} purchase order(s) awaiting receipt</span></div>
+          <button className="secondary-button" type="button" onClick={onNotifications}>Review notifications</button>
+        </section>
+      )}
+      <section className="stats dashboard-stats" aria-label="Inventory and purchasing KPIs">
+        <StatCard icon="▦" color="purple" label="Total Products" value={inventory.productCount.toLocaleString()} detail="Current product records" />
+        <StatCard icon="▤" color="blue" label="Total Stock Quantity" value={inventory.totalQuantity.toLocaleString()} detail="Sum of valid current quantities" />
+        <StatCard icon="৳" color="green" label="Total Inventory Value" value={formatCurrency(inventory.totalValue)} detail="Current quantity × unit price" />
+        <StatCard icon="!" color="orange" label="Low Stock Items" value={inventory.lowStockCount.toLocaleString()} detail="Above zero, at/below reorder level" />
+        <StatCard icon="×" color="red" label="Out of Stock" value={inventory.outOfStockCount.toLocaleString()} detail="Current quantity is zero" />
+        <StatCard icon="▣" color="purple" label="Pending Purchase Orders" value={orderAnalytics.statusCounts.Draft.toLocaleString()} detail="Database Pending displayed as Draft" />
       </section>
-      <section className="dashboard-grid">
-        <article className="overview-card"><div className="section-heading"><div><h2>Low-stock products</h2><p>Items at or below their reorder threshold.</p></div><button className="text-button" onClick={onProducts}>View products</button></div>{lowStockProducts.length ? <div className="overview-list">{lowStockProducts.map((product) => <button className="overview-row overview-button" key={product.id} onClick={() => onView(product)}><span className="list-icon orange">!</span><div><strong>{product.name}</strong><small>{product.category}</small></div><span className="quantity-warning">{product.quantity} left</span></button>)}</div> : <EmptyState message="No low-stock products right now." />}</article>
-        <article className="overview-card"><div className="section-heading"><div><h2>Recent stock movements</h2><p>Recorded in this browser session.</p></div><button className="text-button" onClick={onStock}>View history</button></div>{stockMovements.length ? <div className="overview-list">{stockMovements.slice(0, 3).map((movement) => <div className="overview-row" key={movement.id}><span className={`list-icon ${movement.type === 'Stock in' ? 'green' : 'blue'}`}>{movement.type === 'Stock in' ? '↓' : '↑'}</span><div><strong>{movement.productName}</strong><small>{formatMovementDate(movement.date)} · {movement.type}</small></div><span className="movement-quantity">{movement.type === 'Stock in' ? '+' : '-'}{movement.quantity}</span></div>)}</div> : <EmptyState message="No stock movements recorded yet." />}</article>
+
+      <section className="dashboard-grid dashboard-chart-grid">
+        <article className="table-card dashboard-panel">
+          <div className="table-heading"><div><h2>Stock overview</h2><p>Current product counts by validated stock status.</p></div><button className="text-button" type="button" onClick={onNotifications}>View alerts</button></div>
+          <StockDistributionChart counts={stockCounts} />
+        </article>
+        <article className="table-card dashboard-panel">
+          <div className="table-heading"><div><h2>Stock movement trend</h2><p>Stock IN and OUT quantities · last 7 days</p></div><button className="text-button" type="button" onClick={onStock}>Stock history</button></div>
+          {recentMovements.length ? <MovementChart buckets={movementTrend.buckets} /> : <EmptyState message="No stock movements recorded in the last 7 days." />}
+        </article>
+        <article className="table-card dashboard-panel">
+          <div className="table-heading"><div><h2>Purchase order status</h2><p>Current status distribution</p></div><button className="text-button" type="button" onClick={onPurchaseOrders}>View orders</button></div>
+          {orders.length ? <div className="dashboard-status-chart">{statusLabels.map((status) => (
+            <div className="dashboard-status-row" key={status}>
+              <span>{status}</span><div className="bar-track"><span style={{ width: `${orderAnalytics.statusCounts[status] / maxOrderCount * 100}%` }} /></div><strong>{orderAnalytics.statusCounts[status]}</strong>
+            </div>
+          ))}</div> : <EmptyState message="No purchase orders have been recorded." />}
+        </article>
       </section>
-      <section className="table-card dashboard-products"><div className="table-heading"><div><h2>Product inventory</h2><p>Manage and monitor your current stock.</p></div><button className="text-button" onClick={onProducts}>View all products</button></div><ProductTable products={products} filteredProducts={products.slice(0, 5)} onView={onView} onEdit={() => {}} onDelete={() => {}} compact /></section>
-    </>
-  )
+
+      <section className="dashboard-grid dashboard-detail-grid">
+        <article className="table-card dashboard-panel">
+          <div className="table-heading"><div><h2>Inventory alerts</h2><p>Products at or below their reorder level.</p></div><button className="text-button" type="button" onClick={onNotifications}>All alerts</button></div>
+          <div className="overview-list">
+            {alerts.map((product) => {
+              const isOut = getReportStockStatus(product) === 'out'
+              return <button className="overview-row overview-button" type="button" key={product.id} onClick={() => onViewProduct(product)}>
+                <span className={`list-icon ${isOut ? 'red' : 'orange'}`}>{isOut ? '×' : '!'}</span>
+                <span className="dashboard-row-copy"><strong>{product.name}</strong><small>{product.sku || 'No SKU'} · reorder level {product.reorderThreshold ?? product.reorder_level ?? '—'}</small></span>
+                <span className={isOut ? 'dashboard-alert-label out' : 'dashboard-alert-label low'}>{isOut ? 'Out of stock' : `${getValidProductQuantity(product)} left`}</span>
+              </button>
+            })}
+            {!alerts.length && <EmptyState message="No low-stock or out-of-stock products." />}
+          </div>
+        </article>
+        <article className="table-card dashboard-panel">
+          <div className="table-heading"><div><h2>Recent stock movements</h2><p>Latest persisted stock activity.</p></div><button className="text-button" type="button" onClick={onStock}>View stock history</button></div>
+          <div className="overview-list">
+            {recentMovementRecords.map((movement) => (
+              <div className="overview-row" key={movement.id}>
+                <span className={`list-icon ${movement.type === 'Stock in' ? 'green' : movement.type === 'Stock out' ? 'blue' : 'purple'}`}>{movement.type === 'Stock in' ? '↓' : movement.type === 'Stock out' ? '↑' : '↔'}</span>
+                <span className="dashboard-row-copy"><strong>{movement.productName || 'Unknown product'}</strong><small>{movement.type} · {formatMovementDate(movement.date)}{movement.remarks ? ` · ${movement.remarks}` : ''}</small></span>
+                <span className="movement-quantity">{Number.isSafeInteger(Number(movement.quantity)) ? movement.quantity : '—'}</span>
+              </div>
+            ))}
+            {!recentMovementRecords.length && <EmptyState message="No stock movements recorded yet." />}
+          </div>
+        </article>
+      </section>
+
+      <section className="table-card dashboard-panel dashboard-orders">
+        <div className="table-heading"><div><h2>Recent purchase orders</h2><p>Latest orders with values calculated from their order lines.</p></div><button className="text-button" type="button" onClick={onPurchaseOrders}>View all purchase orders</button></div>
+        <div className="table-scroll"><table><thead><tr><th>ORDER</th><th>SUPPLIER</th><th>ORDER DATE</th><th>TOTAL AMOUNT</th><th>STATUS</th></tr></thead><tbody>
+          {recentOrders.map((order) => <tr key={order.id}>
+            <td className="product-name">{order.orderNumber || `PO-${order.id}`}</td>
+            <td>{order.supplierName || 'Unknown supplier'}</td>
+            <td>{formatDate(order.orderDate || order.createdAt)}</td>
+            <td>{formatCurrency(getPurchaseOrderTotal(order))}</td>
+            <td><span className={`po-status po-${normalizeText(order.status === 'Pending' ? 'Draft' : order.status).replaceAll(' ', '-')}`}>{order.status === 'Pending' ? 'Draft' : order.status}</span></td>
+          </tr>)}
+          {!recentOrders.length && <tr><td colSpan="5"><EmptyState message="No purchase orders have been recorded yet." /></td></tr>}
+        </tbody></table></div>
+      </section>
+      </>}
+    </section>
+  </section>
 }
 
-function NotificationsPage({ products, orders, suppliers, reorderQuantities, setReorderQuantities, reorderSuppliers, setReorderSuppliers, onProduct, onOrder, onCreateOrder }) {
+function DashboardNavigationTiles({
+  onProducts,
+  onStock,
+  onPurchaseOrders,
+  onCategories,
+  onSuppliers,
+  onNotifications,
+  onReports,
+}) {
+  const tiles = [
+    { label: 'Products', icon: '▦', color: 'purple', onClick: onProducts },
+    { label: 'Stock Management', icon: '⇄', color: 'blue', onClick: onStock },
+    { label: 'Purchase Orders', icon: '▣', color: 'orange', onClick: onPurchaseOrders },
+    { label: 'Categories', icon: '▧', color: 'teal', onClick: onCategories },
+    { label: 'Suppliers', icon: '♧', color: 'green', onClick: onSuppliers },
+    { label: 'Notifications', icon: '!', color: 'red', onClick: onNotifications },
+    { label: 'Reports & Analytics', icon: '▤', color: 'indigo', onClick: onReports },
+    { label: 'Inventory Overview', icon: '◫', color: 'navy', onClick: () => {
+      document.getElementById('dashboard-inventory-overview')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    } },
+  ]
+
+  return <div className="dashboard-navigation-tiles">
+    {tiles.map((tile) => (
+      <button className="dashboard-navigation-tile" type="button" key={tile.label} onClick={tile.onClick}>
+        <span className={`dashboard-navigation-icon ${tile.color}`} aria-hidden="true">{tile.icon}</span>
+        <span className="dashboard-navigation-label">{tile.label}</span>
+      </button>
+    ))}
+  </div>
+}
+
+function StockDistributionChart({ counts }) {
+  const validCount = counts.inStock + counts.low + counts.out
+  const segments = [
+    { label: 'In stock', count: counts.inStock, color: '#1c9a70' },
+    { label: 'Low stock', count: counts.low, color: '#d98225' },
+    { label: 'Out of stock', count: counts.out, color: '#d04444' },
+  ]
+  return <div className="stock-distribution">
+    {validCount
+      ? <div className="stock-distribution-bar" role="img" aria-label={`${counts.inStock} in stock, ${counts.low} low stock, ${counts.out} out of stock`}>
+        {segments.map((segment) => {
+          const width = segment.count / validCount * 100
+          const element = <span key={segment.label} title={`${segment.label}: ${segment.count}`} style={{ width: `${width}%`, backgroundColor: segment.color }} />
+          return element
+        })}
+      </div>
+      : <EmptyState message="No products have valid quantity and reorder-level data." />}
+    <div className="stock-distribution-legend">
+      {segments.map((segment) => <div key={segment.label}><span><i style={{ backgroundColor: segment.color }} />{segment.label}</span><strong>{segment.count}</strong></div>)}
+      {counts.unknown > 0 && <div><span><i className="stock-unknown-legend" />Unknown data</span><strong>{counts.unknown}</strong></div>}
+    </div>
+    <p className="stock-distribution-note">{validCount.toLocaleString()} of {validCount + counts.unknown} products classified</p>
+  </div>
+}
+
+function NotificationsPage({
+  products,
+  allProducts,
+  orders,
+  movements,
+  suppliers,
+  reorderQuantities,
+  setReorderQuantities,
+  reorderSuppliers,
+  setReorderSuppliers,
+  storageError,
+  onClearStorageError,
+  onProduct,
+  onOrder,
+  onStockMovement,
+  onCreateOrder,
+}) {
   const [recommendationErrors, setRecommendationErrors] = useState({})
+  const [initialNotificationStore] = useState(() => {
+    try {
+      return { state: readNotificationState(), error: '' }
+    } catch (error) {
+      return {
+        state: { notifications: [], deletedIds: [] },
+        error: error instanceof Error ? error.message : 'Unable to load saved notification preferences.',
+      }
+    }
+  })
+  const [notificationState, setNotificationState] = useState(initialNotificationStore.state)
+  const [filter, setFilter] = useState('all')
+  const [localStorageError, setLocalStorageError] = useState(initialNotificationStore.error)
   const getSupplier = (product) => suppliers.find((supplier) => normalizeText(supplier.name) === normalizeText(product.supplier))
   const getQuantity = (product) => reorderQuantities[product.id] ?? getSuggestedReorderQuantity(product)
   const getSupplierId = (product) => reorderSuppliers[product.id] ?? String(getSupplier(product)?.id || '')
+  const sourceNotifications = useMemo(
+    () => buildSourceNotifications({ products: allProducts, movements, orders }),
+    [allProducts, movements, orders]
+  )
+  const mergedNotificationState = mergeNotificationState(notificationState, sourceNotifications)
+  const notifications = mergedNotificationState.notifications
+    .filter((notification) => !mergedNotificationState.deletedIds.includes(notification.id))
+    .sort((first, second) => {
+      const firstDate = Date.parse(first.timestamp || '')
+      const secondDate = Date.parse(second.timestamp || '')
+      return (Number.isNaN(secondDate) ? 0 : secondDate) - (Number.isNaN(firstDate) ? 0 : firstDate)
+    })
+  const unreadCount = notifications.filter((notification) => !notification.read).length
+  const stockAlertCount = notifications.filter((notification) => (
+    notification.type === 'low-stock' || notification.type === 'out-of-stock'
+  )).length
+  const visibleNotifications = notifications.filter((notification) => (
+    filter === 'all' || (filter === 'unread' ? !notification.read : notification.read)
+  ))
+
+  useEffect(() => {
+    function handleStorageError(event) {
+      setLocalStorageError(event.detail)
+    }
+    window.addEventListener('inventra-notification-storage-error', handleStorageError)
+    return () => window.removeEventListener('inventra-notification-storage-error', handleStorageError)
+  }, [])
+
+  useEffect(() => {
+    if (localStorageError) return
+    try {
+      const nextState = mergeNotificationState(notificationState, sourceNotifications)
+      if (JSON.stringify(nextState) === JSON.stringify(notificationState)) return
+      writeNotificationState(nextState)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to save notification history in this browser.'
+      window.dispatchEvent(new CustomEvent('inventra-notification-storage-error', { detail: message }))
+    }
+  }, [localStorageError, notificationState, sourceNotifications])
+
+  function saveState(nextState) {
+    setNotificationState(nextState)
+    try {
+      writeNotificationState(nextState)
+      setLocalStorageError('')
+      onClearStorageError()
+    } catch (error) {
+      setLocalStorageError(error instanceof Error ? error.message : 'Unable to save notification preferences in this browser.')
+    }
+  }
+
+  function markRead(notificationId) {
+    saveState(markNotificationRead(mergedNotificationState, notificationId))
+  }
+
+  function markAllRead() {
+    saveState(markAllNotificationsRead(mergedNotificationState))
+  }
+
+  function removeNotification(notificationId) {
+    saveState(deleteNotification(mergedNotificationState, notificationId))
+  }
+
+  function openNotification(notification) {
+    markRead(notification.id)
+    const destination = notification.destination
+    if (!destination) return
+    if (destination.kind === 'product') {
+      const product = allProducts.find((item) => Number(item.id) === Number(destination.id))
+      if (product) onProduct(product)
+    } else if (destination.kind === 'order') {
+      const order = orders.find((item) => Number(item.id) === Number(destination.id))
+      if (order) onOrder(order)
+    } else if (destination.kind === 'stock') {
+      onStockMovement(notification)
+    }
+  }
+
   function updateQuantity(product, value) {
     setReorderQuantities((current) => ({ ...current, [product.id]: value }))
     setRecommendationErrors((current) => ({ ...current, [product.id]: '' }))
@@ -1177,13 +1659,57 @@ function NotificationsPage({ products, orders, suppliers, reorderQuantities, set
     onCreateOrder(product, quantity, getSupplierId(product))
   }
   return <section className="notifications-page">
-    <section className="notification-summary"><article className="attention-card red"><strong>{products.filter((product) => getStockStatus(product) === 'out').length}</strong><span>Out-of-stock products</span></article><article className="attention-card orange"><strong>{products.filter((product) => getStockStatus(product) === 'low').length}</strong><span>Low-stock products</span></article><article className="attention-card blue"><strong>{orders.length}</strong><span>Orders awaiting receipt</span></article></section>
-    <section className="table-card notification-card"><div className="table-heading"><div><h2>Actionable notifications</h2><p>Alerts are derived from current quantities and purchase-order status. They reset with React state on refresh.</p></div></div><div className="notification-list">
-      {products.map((product) => <button className="notification-item" key={`product-${product.id}`} onClick={() => onProduct(product)}><span className={`list-icon ${getStockStatus(product) === 'out' ? 'red' : 'orange'}`}>{getStockStatus(product) === 'out' ? '×' : '!'}</span><span><strong>{product.name}</strong><small>{product.sku} · {getStockLabel(product)} · Current quantity {product.quantity} · Reorder threshold {product.reorderThreshold}</small></span><span className="text-button">View product</span></button>)}
-      {orders.map((order) => <button className="notification-item" key={`order-${order.id}`} onClick={() => onOrder(order)}><span className="list-icon blue">⇄</span><span><strong>{order.orderNumber} · {order.supplierName}</strong><small>{order.status} · {order.lines.reduce((sum, line) => sum + Math.max(0, line.orderedQuantity - line.receivedQuantity), 0)} unit(s) outstanding</small></span><span className="text-button">View order</span></button>)}
-      {products.length === 0 && orders.length === 0 && <EmptyState message="No stock or purchase-order alerts right now." />}
-    </div></section>
-    <section className="table-card reorder-card"><div className="table-heading"><div><h2>Reorder recommendations</h2><p>Suggested quantities are a simple planning aid, not a demand forecast. Review before creating a draft.</p></div></div><div className="table-scroll"><table><thead><tr><th>PRODUCT</th><th>SKU</th><th>CATEGORY</th><th>CURRENT</th><th>THRESHOLD</th><th>SUGGESTED QTY</th><th>SUPPLIER</th><th>STATUS</th><th>ACTION</th></tr></thead><tbody>{products.map((product) => { const supplier = getSupplier(product); const supplierId = getSupplierId(product); return <tr key={product.id}><td className="product-name">{product.name}</td><td>{product.sku}</td><td>{product.category}</td><td>{product.quantity}</td><td>{product.reorderThreshold}</td><td><input className="recommendation-input" type="number" min="1" step="1" value={getQuantity(product)} onChange={(event) => updateQuantity(product, event.target.value)} aria-label={`Suggested reorder quantity for ${product.name}`} />{recommendationErrors[product.id] && <span className="field-error">{recommendationErrors[product.id]}</span>}</td><td><select className="recommendation-select" value={supplierId} onChange={(event) => setReorderSuppliers((current) => ({ ...current, [product.id]: event.target.value }))} aria-label={`Supplier for ${product.name}`}><option value="">Select supplier</option>{suppliers.map((option) => <option value={option.id} key={option.id}>{option.name}</option>)}</select>{supplier && <small className="field-helper">Existing: {supplier.name}</small>}</td><td><span className={`status ${getStockStatus(product)}`}>{getStockLabel(product)}</span></td><td><button className="table-action" onClick={() => startOrder(product)} disabled={!supplierId}>Create draft</button></td></tr> })}{products.length === 0 && <tr><td colSpan="9"><EmptyState message="No products need replenishment." /></td></tr>}</tbody></table></div></section>
+    <header className="notifications-heading">
+      <div><h2>Inventory notifications</h2><p>Stock activity and purchase-order events from the current inventory data.</p></div>
+      <span className="notification-count">{notifications.length} notification{notifications.length === 1 ? '' : 's'}</span>
+    </header>
+    {(storageError || localStorageError) && <p className="notification-storage-error" role="alert">{storageError || localStorageError}</p>}
+    <section className="notification-summary">
+      <article className="attention-card blue"><strong>{notifications.length}</strong><span>Total notifications</span></article>
+      <article className="attention-card orange"><strong>{unreadCount}</strong><span>Unread</span></article>
+      <article className="attention-card red"><strong>{stockAlertCount}</strong><span>Stock alerts</span></article>
+    </section>
+    <section className="table-card notification-card">
+      <div className="table-heading notification-controls">
+        <div><h2>Recent activity</h2><p>Read status and dismissed notifications are saved in this browser.</p></div>
+        <button className="secondary-button" type="button" onClick={markAllRead} disabled={unreadCount === 0}>Mark All as Read</button>
+      </div>
+      <div className="notification-filters" aria-label="Filter notifications">
+        {['all', 'unread', 'read'].map((option) => (
+          <button
+            type="button"
+            className={`notification-filter${filter === option ? ' active' : ''}`}
+            aria-pressed={filter === option}
+            key={option}
+            onClick={() => setFilter(option)}
+          >
+            {option === 'all' ? 'All' : option === 'unread' ? 'Unread' : 'Read'}
+          </button>
+        ))}
+      </div>
+      <div className="notification-list" aria-live="polite">
+        {visibleNotifications.map((notification) => (
+          <article className={`notification-entry${notification.read ? ' read' : ' unread'}`} key={notification.id}>
+            <span className={`notification-type-icon ${notification.type}`} aria-hidden="true">
+              {notification.icon}
+            </span>
+            <button className="notification-open" type="button" onClick={() => openNotification(notification)}>
+              <span className="notification-title">{notification.title}{!notification.read && <span className="unread-dot" aria-label="Unread" />}</span>
+              <span className="notification-message">{notification.message}</span>
+              <time dateTime={notification.timestamp || undefined}>{notification.timestamp ? formatNotificationDate(notification.timestamp) : 'Date unavailable'}</time>
+            </button>
+            <div className="notification-actions">
+              {!notification.read && <button className="notification-action" type="button" onClick={() => markRead(notification.id)} aria-label={`Mark as read: ${notification.title}`}>Mark read</button>}
+              <button className="notification-delete" type="button" onClick={() => removeNotification(notification.id)} aria-label={`Delete notification: ${notification.title}`} title="Delete notification">×</button>
+            </div>
+          </article>
+        ))}
+        {visibleNotifications.length === 0 && (
+          <EmptyState message={notifications.length === 0 ? 'There are no inventory notifications yet.' : `No ${filter} notifications.`} />
+        )}
+      </div>
+    </section>
+    <section className="table-card reorder-card"><div className="table-heading"><div><h2>Reorder recommendations</h2><p>Suggested quantities are a simple planning aid, not a demand forecast. Review before creating a draft.</p></div></div><div className="table-scroll"><table><thead><tr><th>PRODUCT</th><th>SKU</th><th>CATEGORY</th><th>CURRENT</th><th>THRESHOLD</th><th>SUGGESTED QTY</th><th>SUPPLIER</th><th>STATUS</th><th>ACTION</th></tr></thead><tbody>{products.map((product) => { const supplier = getSupplier(product); const supplierId = getSupplierId(product); return <tr key={product.id}><td className="product-name">{product.name}</td><td>{product.sku}</td><td>{product.category}</td><td>{product.quantity}</td><td>{product.reorderThreshold}</td><td><input className="recommendation-input" type="number" min="1" step="1" value={getQuantity(product)} onChange={(event) => updateQuantity(product, event.target.value)} aria-label={`Suggested reorder quantity for ${product.name}`} />{recommendationErrors[product.id] && <span className="field-error">{recommendationErrors[product.id]}</span>}</td><td><select className="recommendation-select" value={supplierId} onChange={(event) => setReorderSuppliers((current) => ({ ...current, [product.id]: event.target.value }))} aria-label={`Supplier for ${product.name}`}><option value="">Select supplier</option>{suppliers.map((option) => <option value={option.id} key={option.id}>{option.name}</option>)}</select>{supplier && <small className="field-helper">Existing: {supplier.name}</small>}</td><td><span className={`status ${getStockStatus(product)}`}>{getStockLabel(product)}</span></td><td><button className="table-action" type="button" onClick={() => startOrder(product)} disabled={!supplierId}>Create draft</button></td></tr> })}{products.length === 0 && <tr><td colSpan="9"><EmptyState message="No products need replenishment." /></td></tr>}</tbody></table></div></section>
   </section>
 }
 
@@ -1262,6 +1788,11 @@ function formatMovementDate(date) {
   return parsedDate ? parsedDate.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : 'Unknown date'
 }
 
+function formatNotificationDate(date) {
+  const parsedDate = parseDateSafely(date)
+  return parsedDate ? parsedDate.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : 'Date unavailable'
+}
+
 function StatCard({ icon, color, label, value, detail }) {
   return <article className="stat-card"><span className={`stat-icon ${color}`}>{icon}</span><p>{label}</p><h2>{value}</h2><small>{detail}</small></article>
 }
@@ -1270,99 +1801,381 @@ function EmptyState({ message }) {
   return <div className="empty-state"><span>✓</span><p>{message}</p></div>
 }
 
-function Reports({ products, categories, suppliers, movements, orders, filters, setFilters }) {
-  const categoryNames = categories.map((category) => category?.name).filter(Boolean)
+function Reports({ products, categories, suppliers, movements, orders, filters, setFilters, loading, dataError, onRefresh }) {
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshError, setRefreshError] = useState('')
   const safeProducts = products.filter(Boolean)
   const safeMovements = movements.filter(Boolean)
   const safeOrders = orders.filter(Boolean)
-  const getMovementProduct = (movement) => safeProducts.find((product) => product.id === movement.productId || product.sku === movement.sku)
-  const filteredMovements = safeMovements.filter((movement) => {
-    const product = getMovementProduct(movement)
-    return isDateOnOrAfter(movement.date, filters.movementStart)
-      && isDateOnOrBefore(movement.date, filters.movementEnd)
-      && (filters.movementProduct === 'all' || String(movement.productId) === filters.movementProduct)
+  const categoryNames = categories.map((category) => category?.name).filter(Boolean)
+  const dateRange = getReportDateRange(filters.dateRange, filters.customStart, filters.customEnd)
+  const inventory = calculateInventoryMetrics(safeProducts)
+  const dateMovements = safeMovements.filter((movement) => isWithinReportDateRange(movement.date, dateRange))
+  const productById = new Map(safeProducts.map((product) => [String(product.id), product]))
+  const filteredMovements = dateMovements.filter((movement) => {
+    const product = productById.get(String(movement.productId))
+    return (filters.movementProduct === 'all' || String(movement.productId) === filters.movementProduct)
       && (filters.movementCategory === 'all' || product?.category === filters.movementCategory)
       && (filters.movementType === 'all' || movement.type === filters.movementType)
       && normalizeText(movement.reference).includes(normalizeText(filters.movementReference))
   })
-  const filteredOrders = safeOrders.filter((order) =>
-    isDateOnOrAfter(order.orderDate, filters.orderStart)
-    && isDateOnOrBefore(order.orderDate, filters.orderEnd)
-    && (filters.orderSupplier === 'all' || String(order.supplierId) === filters.orderSupplier)
+  const dateOrders = safeOrders.filter((order) => isWithinReportDateRange(order.orderDate || order.createdAt, dateRange))
+  const filteredOrders = dateOrders.filter((order) => (
+    (filters.orderSupplier === 'all' || String(order.supplierId) === filters.orderSupplier)
     && (filters.orderStatus === 'all' || order.status === filters.orderStatus)
-  )
-  const totalUnits = safeProducts.reduce((sum, product) => sum + (Number(product.quantity) || 0), 0)
-  const inventoryValue = safeProducts.reduce((sum, product) => sum + (Number(product.quantity) || 0) * (Number(product.price) || 0), 0)
-  const lowStockCount = safeProducts.filter((product) => getStockStatus(product) === 'low').length
-  const outOfStockCount = safeProducts.filter((product) => getStockStatus(product) === 'out').length
-  const categorySummary = categoryNames.map((name) => {
-    const categoryProducts = safeProducts.filter((product) => product.category === name)
-    return { name, products: categoryProducts.length, units: categoryProducts.reduce((sum, product) => sum + (Number(product.quantity) || 0), 0), value: categoryProducts.reduce((sum, product) => sum + (Number(product.quantity) || 0) * (Number(product.price) || 0), 0) }
-  }).filter((summary) => summary.products > 0)
-  const conditionSummary = [...new Set(safeProducts.map((product) => product.condition).filter(Boolean))].map((condition) => ({
-    condition, count: safeProducts.filter((product) => product.condition === condition).length,
-  }))
-  const movementCounts = ['Stock in', 'Stock out'].map((type) => ({ type, count: filteredMovements.filter((movement) => movement.type === type).length }))
+  ))
+  const movementTotals = calculateMovementTotals(filteredMovements)
+  movementTotals.net = movementTotals.stockIn - movementTotals.stockOut
+  const movementSeries = buildMovementTimeSeries(filteredMovements, dateRange)
+  const productMovementSummary = buildProductMovementSummary(filteredMovements, safeProducts)
+  const purchaseOrders = calculatePurchaseOrderAnalytics(filteredOrders)
+  const lowStockProducts = safeProducts.filter((product) => getReportStockStatus(product) === 'low')
+  const outOfStockProducts = safeProducts.filter((product) => getReportStockStatus(product) === 'out')
+  const requiringReorder = safeProducts
+    .filter((product) => ['low', 'out'].includes(getReportStockStatus(product)))
+    .sort((first, second) => (getValidProductQuantity(first) ?? 0) - (getValidProductQuantity(second) ?? 0))
+  const highestValueProducts = [...safeProducts]
+    .filter((product) => getProductInventoryValue(product) !== null)
+    .sort((first, second) => getProductInventoryValue(second) - getProductInventoryValue(first))
+    .slice(0, 10)
+  const highestQuantityProducts = [...safeProducts]
+    .filter((product) => getValidProductQuantity(product) !== null)
+    .sort((first, second) => getValidProductQuantity(second) - getValidProductQuantity(first))
+    .slice(0, 10)
+  const recentlyMovedProducts = [...productMovementSummary]
+    .sort((first, second) => new Date(second.latestMovement || 0) - new Date(first.latestMovement || 0))
+    .slice(0, 10)
   const orderStatuses = ['Draft', 'Ordered', 'Partially Received', 'Received', 'Cancelled']
-  const orderSummary = orderStatuses.map((status) => {
-    const statusOrders = filteredOrders.filter((order) => order.status === status)
-    return { status, count: statusOrders.length, total: statusOrders.reduce((sum, order) => sum + getPurchaseOrderTotal(order), 0) }
-  })
-  const supplierSummary = suppliers.map((supplier) => {
-    const supplierOrders = filteredOrders.filter((order) => order.supplierId === supplier.id)
-    return { name: supplier.name, count: supplierOrders.length, total: supplierOrders.reduce((sum, order) => sum + getPurchaseOrderTotal(order), 0) }
-  }).filter((summary) => summary.count > 0)
-  const outstandingOrders = filteredOrders.filter((order) => order.status === 'Ordered' || order.status === 'Partially Received').length
-  const maxCategoryUnits = Math.max(...categorySummary.map((summary) => summary.units), 1)
-  const maxMovementCount = Math.max(...movementCounts.map((summary) => summary.count), 1)
-  const maxOrderCount = Math.max(...orderSummary.map((summary) => summary.count), 1)
+  const maxOrderCount = Math.max(...orderStatuses.map((status) => purchaseOrders.statusCounts[status]), 1)
+  const rangeLabel = dateRange.valid ? `${dateRange.start} – ${dateRange.end}` : 'Choose a valid custom date range'
 
   function updateFilter(field, value) {
     setFilters((current) => ({ ...current, [field]: value }))
   }
+
   function clearReportFilters() {
     setFilters(emptyReportFilters)
   }
+
+  async function refreshReports() {
+    setRefreshing(true)
+    setRefreshError('')
+    try {
+      await onRefresh()
+    } catch (error) {
+      setRefreshError(error instanceof Error ? error.message : 'Unable to refresh reports.')
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
   function exportInventory() {
-    downloadCsv('inventra-inventory-report.csv', ['Product', 'SKU', 'Category', 'Quantity', 'Unit price (BDT)', 'Estimated value (BDT)', 'Status'], safeProducts.map((product) => [
-      { value: product.name }, { value: product.sku }, { value: product.category }, { value: product.quantity, numeric: true }, { value: product.price, numeric: true }, { value: (product.quantity || 0) * (product.price || 0), numeric: true }, { value: getStockLabel(product) },
-    ]))
+    downloadCsv(
+      'inventra-inventory-report.csv',
+      ['Product', 'SKU', 'Category', 'Quantity', 'Reorder level', 'Unit price (BDT)', 'Estimated value (BDT)', 'Status'],
+      safeProducts.map((product) => [
+        { value: product.name }, { value: product.sku }, { value: product.category },
+        { value: getValidProductQuantity(product), numeric: true },
+        { value: product.reorderThreshold ?? product.reorder_level, numeric: true },
+        { value: product.price, numeric: true },
+        { value: getProductInventoryValue(product), numeric: true },
+        { value: getStockLabel(product) },
+      ])
+    )
   }
+
   function exportMovements() {
-    downloadCsv('inventra-stock-movements-report.csv', ['Date', 'Product', 'SKU', 'Type', 'Quantity', 'Previous quantity', 'Resulting quantity', 'Reference', 'Department', 'Remarks'], filteredMovements.map((movement) => [
-      { value: formatMovementDate(movement.date) }, { value: movement.productName }, { value: movement.sku }, { value: movement.type }, { value: movement.quantity, numeric: true }, { value: movement.previousQuantity, numeric: true }, { value: movement.resultingQuantity, numeric: true }, { value: movement.reference }, { value: movement.department }, { value: movement.remarks },
-    ]))
+    downloadCsv(
+      'inventra-stock-movements-report.csv',
+      ['Date', 'Product', 'SKU', 'Type', 'Quantity', 'Previous quantity', 'Resulting quantity', 'Reference', 'Department', 'Remarks'],
+      filteredMovements.map((movement) => [
+        { value: formatMovementDate(movement.date) }, { value: movement.productName }, { value: movement.sku },
+        { value: movement.type }, { value: movement.quantity, numeric: true },
+        { value: movement.previousQuantity, numeric: true }, { value: movement.resultingQuantity, numeric: true },
+        { value: movement.reference }, { value: movement.department }, { value: movement.remarks },
+      ])
+    )
   }
+
   function exportOrders() {
-    downloadCsv('inventra-purchase-orders-report.csv', ['Order number', 'Supplier', 'Order date', 'Expected delivery', 'Status', 'Total (BDT)'], filteredOrders.map((order) => [
-      { value: order.orderNumber }, { value: order.supplierName }, { value: formatDate(order.orderDate) }, { value: order.expectedDelivery ? formatDate(order.expectedDelivery) : '' }, { value: order.status }, { value: getPurchaseOrderTotal(order), numeric: true },
-    ]))
+    downloadCsv(
+      'inventra-purchase-orders-report.csv',
+      ['Order number', 'Supplier', 'Order date', 'Status', 'Ordered quantity', 'Received quantity', 'Outstanding quantity', 'Total order value (BDT)', 'Non-cancelled order value (BDT)'],
+      filteredOrders.map((order) => {
+        const summary = calculatePurchaseOrderAnalytics([order])
+        return [
+          { value: order.orderNumber }, { value: order.supplierName }, { value: formatDate(order.orderDate) },
+          { value: order.status }, { value: summary.orderedQuantity, numeric: true },
+          { value: summary.receivedQuantity, numeric: true }, { value: summary.outstandingQuantity, numeric: true },
+          { value: summary.orderValue, numeric: true },
+          { value: summary.nonCancelledOrderValue, numeric: true },
+        ]
+      })
+    )
   }
+
+  function productRows(list, valueGetter) {
+    return list.map((product) => [
+      product.name, product.sku || '—', getValidProductQuantity(product) ?? '—',
+      product.reorderThreshold ?? product.reorder_level ?? '—',
+      valueGetter ? valueGetter(product) : getStockLabel(product),
+    ])
+  }
+
   return <section className="reports-page">
-    <div className="report-actions"><button className="secondary-button" onClick={() => window.print()}>Print reports</button><button className="primary-button" onClick={exportInventory}>Export inventory CSV</button></div>
-    <section className="stats report-stats" aria-label="Inventory report summary">
-      <StatCard icon="▦" color="purple" label="Distinct Products" value={safeProducts.length} detail="Current product records" />
-      <StatCard icon="▤" color="blue" label="Units in Stock" value={totalUnits} detail="Current quantities" />
-      <StatCard icon="৳" color="green" label="Estimated Inventory Value" value={formatCurrency(inventoryValue)} detail="Quantity × listed price" />
-      <StatCard icon="!" color="orange" label="Low Stock" value={lowStockCount} detail="At reorder threshold" />
-      <StatCard icon="×" color="red" label="Out of Stock" value={outOfStockCount} detail="Quantity is zero" />
+    <header className="reports-header">
+      <div><p>Inventory balances are current snapshots. Movement and purchase-order activity follows the selected date range.</p></div>
+      <div className="report-actions">
+        <button className="secondary-button" type="button" onClick={() => window.print()}>Print reports</button>
+        <button className="secondary-button" type="button" onClick={refreshReports} disabled={loading || refreshing}>{refreshing || loading ? 'Refreshing…' : 'Refresh reports'}</button>
+        <button className="primary-button" type="button" onClick={exportInventory}>Export inventory CSV</button>
+      </div>
+    </header>
+    {loading && <div className="reports-loading" role="status">Loading report data from the backend…</div>}
+    {(dataError || refreshError) && <div className="error-message report-error" role="alert">{refreshError || dataError}</div>}
+    <section className="table-card report-card report-range-card">
+      <div className="report-range-controls">
+        <label>Date range
+          <select value={filters.dateRange} onChange={(event) => updateFilter('dateRange', event.target.value)}>
+            <option value="today">Today</option>
+            <option value="last-7-days">Last 7 Days</option>
+            <option value="last-30-days">Last 30 Days</option>
+            <option value="this-month">This Month</option>
+            <option value="this-year">This Year</option>
+            <option value="custom">Custom Range</option>
+          </select>
+        </label>
+        {filters.dateRange === 'custom' && <>
+          <label>From<input type="date" value={filters.customStart} max={filters.customEnd || undefined} onChange={(event) => updateFilter('customStart', event.target.value)} /></label>
+          <label>To<input type="date" value={filters.customEnd} min={filters.customStart || undefined} onChange={(event) => updateFilter('customEnd', event.target.value)} /></label>
+        </>}
+        <span className="report-range-caption">Activity dates: {rangeLabel}</span>
+      </div>
+      {filters.dateRange === 'custom' && !dateRange.valid && <p className="report-range-error" role="status">Select a start and end date; the start must not be after the end.</p>}
     </section>
-    <section className="report-grid">
-      <article className="table-card report-card"><div className="table-heading"><div><h2>Stock by category</h2><p>Current quantities and estimated value.</p></div></div>{categorySummary.length ? <div className="report-bars">{categorySummary.map((summary) => <div className="report-bar-group" key={summary.name}><div><strong>{summary.name}</strong><small>{summary.units} units · {formatCurrency(summary.value)}</small></div><div className="bar-track"><span style={{ width: `${summary.units / maxCategoryUnits * 100}%` }} /></div></div>)}</div> : <EmptyState message="No category data is available." />}</article>
-      <article className="table-card report-card"><div className="table-heading"><div><h2>Product conditions</h2><p>Summary of the current product records.</p></div></div>{conditionSummary.length ? <div className="condition-list">{conditionSummary.map((summary) => <div className="condition-row" key={summary.condition}><span>{summary.condition}</span><strong>{summary.count}</strong></div>)}</div> : <EmptyState message="No condition data is available." />}</article>
+
+    <section className="stats report-stats" aria-label="Current inventory summary">
+      <StatCard icon="▦" color="purple" label="Total Products" value={inventory.productCount} detail="Current product records" />
+      <StatCard icon="▤" color="blue" label="Total Inventory Quantity" value={inventory.totalQuantity.toLocaleString()} detail="Valid current quantities" />
+      <StatCard icon="৳" color="green" label="Inventory Value" value={formatCurrency(inventory.totalValue)} detail="Quantity × unit price" />
+      <StatCard icon="!" color="orange" label="Low Stock Products" value={inventory.lowStockCount} detail="Above zero, at/below reorder level" />
+      <StatCard icon="×" color="red" label="Out of Stock Products" value={inventory.outOfStockCount} detail="Quantity exactly zero" />
+      <StatCard icon="↻" color="purple" label="Requiring Reorder" value={inventory.reorderCount} detail="Low stock plus out of stock" />
     </section>
-    <section className="table-card report-card"><div className="table-heading"><div><h2>Stock movement report</h2><p>Actual movement history only. Data resets on refresh.</p></div><button className="secondary-button" onClick={exportMovements}>Export filtered CSV</button></div>
-      <div className="report-filters"><label>Start date<input type="date" value={filters.movementStart} onChange={(event) => updateFilter('movementStart', event.target.value)} /></label><label>End date<input type="date" value={filters.movementEnd} onChange={(event) => updateFilter('movementEnd', event.target.value)} /></label><label>Product<select value={filters.movementProduct} onChange={(event) => updateFilter('movementProduct', event.target.value)}><option value="all">All products</option>{safeProducts.map((product) => <option key={product.id} value={product.id}>{product.name}</option>)}</select></label><label>Category<select value={filters.movementCategory} onChange={(event) => updateFilter('movementCategory', event.target.value)}><option value="all">All categories</option>{categoryNames.map((name) => <option key={name}>{name}</option>)}</select></label><label>Type<select value={filters.movementType} onChange={(event) => updateFilter('movementType', event.target.value)}><option value="all">All types</option><option>Stock in</option><option>Stock out</option></select></label><label>Reference<input value={filters.movementReference} onChange={(event) => updateFilter('movementReference', event.target.value)} placeholder="Search reference" /></label><button className="secondary-button" onClick={clearReportFilters}>Clear filters</button></div>
-      <ReportTable className="movement-report-table" headers={['DATE / TIME', 'PRODUCT', 'SKU', 'TYPE', 'QUANTITY', 'PREVIOUS', 'RESULTING', 'REFERENCE', 'DEPARTMENT', 'REMARKS']} rows={filteredMovements.map((movement) => [formatMovementDate(movement.date), movement.productName, movement.sku, movement.type, movement.quantity, movement.previousQuantity, movement.resultingQuantity, movement.reference || 'Not specified', movement.department || 'Not specified', movement.remarks || '—'])} emptyMessage="No stock movements match the selected filters." />
+
+    <section className="table-card report-card">
+      <div className="table-heading"><div><h2>Stock movement analytics</h2><p>Transaction quantities are movements during {rangeLabel}; they are not current product balances.</p></div><button className="secondary-button" type="button" onClick={exportMovements}>Export filtered CSV</button></div>
+      <section className="stats report-substats" aria-label="Stock movement totals">
+        <StatCard icon="↓" color="green" label="Stock In Quantity" value={movementTotals.stockIn.toLocaleString()} detail="Units received in selected range" />
+        <StatCard icon="↑" color="blue" label="Stock Out Quantity" value={movementTotals.stockOut.toLocaleString()} detail="Units issued in selected range" />
+        <StatCard icon="±" color="purple" label="Net Stock Movement" value={movementTotals.net.toLocaleString()} detail="Stock in minus stock out" />
+      </section>
+      <div className="report-filters">
+        <label>Product<select value={filters.movementProduct} onChange={(event) => updateFilter('movementProduct', event.target.value)}><option value="all">All products</option>{safeProducts.map((product) => <option key={product.id} value={product.id}>{product.name}</option>)}</select></label>
+        <label>Category<select value={filters.movementCategory} onChange={(event) => updateFilter('movementCategory', event.target.value)}><option value="all">All categories</option>{categoryNames.map((name) => <option key={name}>{name}</option>)}</select></label>
+        <label>Movement type<select value={filters.movementType} onChange={(event) => updateFilter('movementType', event.target.value)}><option value="all">All types</option><option>Stock in</option><option>Stock out</option></select></label>
+        <label>Reference<input value={filters.movementReference} onChange={(event) => updateFilter('movementReference', event.target.value)} placeholder="Search reference" /></label>
+      </div>
+      <div className="report-chart-wrap">
+        <div className="report-section-heading"><h3>Stock in vs stock out over time</h3><span>Grouped by {movementSeries.interval}</span></div>
+        {filteredMovements.length && movementSeries.buckets.length
+          ? <MovementChart buckets={movementSeries.buckets} />
+          : <EmptyState message="No stock movements match this date range and filter selection." />}
+      </div>
+      <div className="report-section-heading report-table-heading"><h3>Recent stock movements</h3><span>{filteredMovements.length} movement record(s)</span></div>
+      <ReportTable
+        className="movement-report-table"
+        headers={['DATE / TIME', 'PRODUCT', 'SKU', 'TYPE', 'MOVED QTY', 'PREVIOUS BALANCE', 'RESULTING BALANCE', 'REFERENCE']}
+        rows={[...filteredMovements].sort((first, second) => new Date(second.date) - new Date(first.date)).slice(0, 10).map((movement) => [
+          formatMovementDate(movement.date), movement.productName || 'Unknown product', movement.sku || '—',
+          movement.type, movement.quantity,
+          movement.previousQuantity ?? 'Not recorded', movement.resultingQuantity ?? 'Not recorded',
+          movement.reference || 'Not specified',
+        ])}
+        emptyMessage="No stock movements match the selected range."
+      />
+      <div className="report-section-heading report-table-heading"><h3>Product-wise movement summary</h3><button className="secondary-button" type="button" onClick={() => downloadCsv(
+        'inventra-product-movement-summary.csv',
+        ['Product', 'SKU', 'Stock in quantity', 'Stock out quantity', 'Net movement', 'Latest movement'],
+        productMovementSummary.map((row) => [row.name, row.sku, row.stockIn, row.stockOut, row.net, formatMovementDate(row.latestMovement)])
+      )}>Export summary CSV</button></div>
+      <ReportTable
+        headers={['PRODUCT', 'SKU', 'STOCK IN', 'STOCK OUT', 'NET MOVEMENT', 'LATEST MOVEMENT']}
+        rows={productMovementSummary.map((row) => [row.name, row.sku, row.stockIn, row.stockOut, row.net, formatMovementDate(row.latestMovement)])}
+        emptyMessage="No product movement totals are available for this range."
+      />
     </section>
-    <section className="table-card report-card"><div className="table-heading"><div><h2>Purchasing report</h2><p>Order values are not payment or accounting figures. Draft and cancelled orders are not completed purchases.</p></div><button className="secondary-button" onClick={exportOrders}>Export filtered CSV</button></div>
-      <div className="report-filters"><label>Order date from<input type="date" value={filters.orderStart} onChange={(event) => updateFilter('orderStart', event.target.value)} /></label><label>Order date to<input type="date" value={filters.orderEnd} onChange={(event) => updateFilter('orderEnd', event.target.value)} /></label><label>Supplier<select value={filters.orderSupplier} onChange={(event) => updateFilter('orderSupplier', event.target.value)}><option value="all">All suppliers</option>{suppliers.map((supplier) => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}</select></label><label>Status<select value={filters.orderStatus} onChange={(event) => updateFilter('orderStatus', event.target.value)}><option value="all">All statuses</option>{orderStatuses.map((status) => <option key={status}>{status}</option>)}</select></label><button className="secondary-button" onClick={clearReportFilters}>Clear filters</button></div>
-      <section className="report-order-summary">{orderSummary.map((summary) => <div className="condition-row" key={summary.status}><span>{summary.status}: {summary.count}</span><strong>{formatCurrency(summary.total)}</strong></div>)}<div className="condition-row"><span>Outstanding orders</span><strong>{outstandingOrders}</strong></div></section>
-      <ReportTable headers={['ORDER NUMBER', 'SUPPLIER', 'ORDER DATE', 'EXPECTED', 'STATUS', 'TOTAL']} rows={filteredOrders.map((order) => [order.orderNumber, order.supplierName, formatDate(order.orderDate), order.expectedDelivery ? formatDate(order.expectedDelivery) : 'Not specified', order.status, formatCurrency(getPurchaseOrderTotal(order))])} emptyMessage="No purchase orders match the selected filters." />
+
+    <section className="table-card report-card">
+      <div className="table-heading"><div><h2>Purchase order analytics</h2><p>Order values use item quantity × unit cost. Cancelled orders are excluded from value, received, and outstanding quantity totals.</p></div><button className="secondary-button" type="button" onClick={exportOrders}>Export filtered CSV</button></div>
+      <section className="stats report-substats report-po-stats" aria-label="Purchase order totals">
+        <StatCard icon="▣" color="purple" label="Total Purchase Orders" value={purchaseOrders.count} detail="Selected range and filters" />
+        <StatCard icon="◌" color="orange" label="Draft" value={purchaseOrders.statusCounts.Draft} detail="Database Pending maps to Draft" />
+        <StatCard icon="→" color="blue" label="Ordered" value={purchaseOrders.statusCounts.Ordered} detail="Placed and awaiting receipts" />
+        <StatCard icon="◷" color="orange" label="Partially Received" value={purchaseOrders.statusCounts['Partially Received']} detail="Some items still outstanding" />
+        <StatCard icon="✓" color="green" label="Fully Received" value={purchaseOrders.statusCounts.Received} detail="All ordered quantities received" />
+        <StatCard icon="×" color="red" label="Cancelled" value={purchaseOrders.statusCounts.Cancelled} detail="Included in status count only" />
+        <StatCard icon="৳" color="green" label="Total PO Value" value={formatCurrency(purchaseOrders.orderValue)} detail="All orders in the selected range" />
+        <StatCard icon="৳" color="green" label="Non-cancelled PO Value" value={formatCurrency(purchaseOrders.nonCancelledOrderValue)} detail="Excludes cancelled orders" />
+        <StatCard icon="▤" color="blue" label="Ordered / Received Qty" value={`${purchaseOrders.orderedQuantity.toLocaleString()} / ${purchaseOrders.receivedQuantity.toLocaleString()}`} detail="Non-cancelled order lines" />
+        <StatCard icon="…" color="orange" label="Outstanding Quantity" value={purchaseOrders.outstandingQuantity.toLocaleString()} detail="Ordered minus received; non-cancelled" />
+      </section>
+      <div className="report-filters">
+        <label>Supplier<select value={filters.orderSupplier} onChange={(event) => updateFilter('orderSupplier', event.target.value)}><option value="all">All suppliers</option>{suppliers.map((supplier) => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}</select></label>
+        <label>Status<select value={filters.orderStatus} onChange={(event) => updateFilter('orderStatus', event.target.value)}><option value="all">All statuses</option>{orderStatuses.map((status) => <option key={status}>{status}</option>)}</select></label>
+        <button className="secondary-button" type="button" onClick={clearReportFilters}>Reset all report filters</button>
+      </div>
+      <div className="report-grid report-chart-grid">
+        <article className="report-chart-wrap">
+          <div className="report-section-heading"><h3>Purchase order status distribution</h3><span>Current status in selected range</span></div>
+          {purchaseOrders.count
+            ? <div className="report-bars">{orderStatuses.map((status) => <div className="report-bar-group" key={status}><div><strong>{status}</strong><small>{purchaseOrders.statusCounts[status]} order(s)</small></div><div className="bar-track"><span style={{ width: `${purchaseOrders.statusCounts[status] / maxOrderCount * 100}%` }} /></div></div>)}</div>
+            : <EmptyState message="No purchase orders match this range and filter selection." />}
+        </article>
+        <article className="report-chart-wrap">
+          <div className="report-section-heading"><h3>Supplier-wise purchase orders</h3><span>Order line values; cancelled excluded from value</span></div>
+          <ReportTable
+            headers={['SUPPLIER', 'ORDERS', 'CANCELLED', 'TOTAL PO VALUE', 'ACTIVE PO VALUE', 'ORDERED QTY', 'RECEIVED QTY', 'OUTSTANDING']}
+            rows={purchaseOrders.suppliers.map((supplier) => [
+              supplier.name, supplier.orderCount, supplier.cancelledCount, formatCurrency(supplier.orderValue), formatCurrency(supplier.nonCancelledOrderValue),
+              supplier.orderedQuantity, supplier.receivedQuantity, supplier.outstandingQuantity,
+            ])}
+            emptyMessage="No supplier purchase-order data is available."
+          />
+        </article>
+      </div>
+      <ReportTable
+        headers={['ORDER NUMBER', 'SUPPLIER', 'ORDER DATE', 'STATUS', 'ORDERED QTY', 'RECEIVED QTY', 'OUTSTANDING', 'ORDER VALUE']}
+        rows={filteredOrders.map((order) => {
+          const summary = calculatePurchaseOrderAnalytics([order])
+          return [
+            order.orderNumber, order.supplierName, formatDate(order.orderDate), order.status,
+            summary.orderedQuantity, summary.receivedQuantity, summary.outstandingQuantity, formatCurrency(summary.orderValue),
+          ]
+        })}
+        emptyMessage="No purchase orders match the selected range and filters."
+      />
     </section>
-    <section className="report-grid"><article className="table-card report-card"><div className="table-heading"><div><h2>Movement types</h2><p>Counts for the filtered movement report.</p></div></div>{filteredMovements.length ? <div className="report-bars">{movementCounts.map((summary) => <div className="report-bar-group" key={summary.type}><div><strong>{summary.type}</strong><small>{summary.count} movement(s)</small></div><div className="bar-track"><span style={{ width: `${summary.count / maxMovementCount * 100}%` }} /></div></div>)}</div> : <EmptyState message="No movement chart is shown without transactions." />}</article><article className="table-card report-card"><div className="table-heading"><div><h2>Purchase order status</h2><p>Order count by current status.</p></div></div>{filteredOrders.length ? <div className="report-bars">{orderSummary.map((summary) => <div className="report-bar-group" key={summary.status}><div><strong>{summary.status}</strong><small>{summary.count} order(s)</small></div><div className="bar-track"><span style={{ width: `${summary.count / maxOrderCount * 100}%` }} /></div></div>)}</div> : <EmptyState message="No order chart is shown without purchase orders." />}</article></section>
-    <section className="table-card report-card supplier-report"><div className="table-heading"><div><h2>Supplier order summary</h2><p>Order counts and order-value totals by supplier.</p></div></div><ReportTable headers={['SUPPLIER', 'ORDERS', 'ORDER VALUE']} rows={supplierSummary.map((summary) => [summary.name, summary.count, formatCurrency(summary.total)])} emptyMessage="No supplier order data is available." /></section>
+
+    <section className="report-grid report-insights-grid">
+      <ProductInsightTable
+        title="Low-stock products"
+        description="Quantity is above zero and at or below reorder level."
+        valueHeading="STATUS"
+        rows={productRows(lowStockProducts)}
+        emptyMessage="No products are currently low on stock."
+        exportName="inventra-low-stock-products.csv"
+      />
+      <ProductInsightTable
+        title="Out-of-stock products"
+        description="Current quantity is exactly zero."
+        valueHeading="STATUS"
+        rows={productRows(outOfStockProducts)}
+        emptyMessage="No products are currently out of stock."
+        exportName="inventra-out-of-stock-products.csv"
+      />
+      <ProductInsightTable
+        title="Products requiring reorder"
+        description={`${requiringReorder.length} low or out-of-stock product(s).`}
+        valueHeading="STATUS"
+        rows={productRows(requiringReorder)}
+        emptyMessage="No products currently require reorder."
+        exportName="inventra-products-requiring-reorder.csv"
+      />
+      <ProductInsightTable
+        title="Highest-value inventory"
+        description="Current quantity multiplied by listed unit price."
+        valueHeading="INVENTORY VALUE"
+        rows={productRows(highestValueProducts, (product) => formatCurrency(getProductInventoryValue(product)))}
+        emptyMessage="No products have valid quantity and unit-price data."
+        exportName="inventra-highest-value-products.csv"
+      />
+      <ProductInsightTable
+        title="Highest stock quantities"
+        description="Largest current product balances."
+        valueHeading="STATUS"
+        rows={productRows(highestQuantityProducts)}
+        emptyMessage="No valid product quantities are available."
+        exportName="inventra-highest-stock-quantities.csv"
+        exportName="inventra-highest-quantity-products.csv"
+      />
+      <article className="table-card report-card">
+        <div className="table-heading"><div><h2>Products with recent movement</h2><p>Movement totals in the selected date range.</p></div><button className="secondary-button" type="button" onClick={() => downloadCsv(
+          'inventra-products-with-recent-movement.csv',
+          ['Product', 'SKU', 'Current quantity', 'Reorder level', 'Stock in', 'Stock out', 'Net movement', 'Latest movement'],
+          recentlyMovedProducts.map((row) => {
+            const product = productById.get(row.id)
+            return [row.name, row.sku, getValidProductQuantity(product || {}) ?? '', product?.reorderThreshold ?? '', row.stockIn, row.stockOut, row.net, formatMovementDate(row.latestMovement)]
+          })
+        )}>Export CSV</button></div>
+        <ReportTable
+          headers={['PRODUCT', 'SKU', 'CURRENT QTY', 'REORDER LEVEL', 'STOCK IN', 'STOCK OUT', 'NET', 'LATEST']}
+          rows={recentlyMovedProducts.map((row) => {
+            const product = productById.get(row.id)
+            return [
+              row.name, row.sku, getValidProductQuantity(product || {}) ?? '—',
+              product?.reorderThreshold ?? product?.reorder_level ?? '—',
+              row.stockIn, row.stockOut, row.net, formatMovementDate(row.latestMovement),
+            ]
+          })}
+          emptyMessage="No products have movement in this date range."
+        />
+      </article>
+    </section>
   </section>
+}
+
+function ProductInsightTable({ title, description, valueHeading, rows, emptyMessage, exportName = '' }) {
+  function exportRows() {
+    if (!exportName) return
+    downloadCsv(exportName, ['Product', 'SKU', 'Current quantity', 'Reorder level', valueHeading], rows)
+  }
+  return <article className="table-card report-card">
+    <div className="table-heading">
+      <div><h2>{title}</h2><p>{description}</p></div>
+      {exportName && <button className="secondary-button" type="button" onClick={exportRows}>Export CSV</button>}
+    </div>
+    <ReportTable
+      headers={['PRODUCT', 'SKU', 'CURRENT QTY', 'REORDER LEVEL', valueHeading]}
+      rows={rows}
+      emptyMessage={emptyMessage}
+    />
+  </article>
+}
+
+function MovementChart({ buckets }) {
+  const width = 900
+  const height = 280
+  const left = 44
+  const right = 18
+  const top = 18
+  const bottom = 42
+  const chartWidth = width - left - right
+  const chartHeight = height - top - bottom
+  const maximum = Math.max(...buckets.flatMap((bucket) => [bucket.stockIn, bucket.stockOut]), 1)
+  const pointX = (index) => buckets.length === 1
+    ? left + chartWidth / 2
+    : left + index * chartWidth / (buckets.length - 1)
+  const pointY = (value) => top + chartHeight - (value / maximum) * chartHeight
+  const stockInPoints = buckets.map((bucket, index) => `${pointX(index)},${pointY(bucket.stockIn)}`).join(' ')
+  const stockOutPoints = buckets.map((bucket, index) => `${pointX(index)},${pointY(bucket.stockOut)}`).join(' ')
+  const labelStep = Math.max(1, Math.ceil(buckets.length / 7))
+  return <div className="movement-chart-scroll">
+    <svg className="movement-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Stock-in and stock-out quantity over time">
+      {[0, 0.25, 0.5, 0.75, 1].map((fraction) => {
+        const y = top + chartHeight * fraction
+        return <g key={fraction}><line x1={left} x2={width - right} y1={y} y2={y} className="chart-grid-line" /><text x={left - 8} y={y + 4} textAnchor="end" className="chart-axis-label">{Math.round(maximum * (1 - fraction))}</text></g>
+      })}
+      <polyline points={stockInPoints} className="movement-line stock-in-line" />
+      <polyline points={stockOutPoints} className="movement-line stock-out-line" />
+      {buckets.map((bucket, index) => <g key={bucket.key}>
+        <circle cx={pointX(index)} cy={pointY(bucket.stockIn)} r="3.5" className="movement-point stock-in-point"><title>{`${bucket.label}: ${bucket.stockIn} units in`}</title></circle>
+        <circle cx={pointX(index)} cy={pointY(bucket.stockOut)} r="3.5" className="movement-point stock-out-point"><title>{`${bucket.label}: ${bucket.stockOut} units out`}</title></circle>
+        {(index % labelStep === 0 || index === buckets.length - 1) && <text x={pointX(index)} y={height - 13} textAnchor="middle" className="chart-axis-label">{bucket.label}</text>}
+      </g>)}
+    </svg>
+    <div className="movement-chart-legend"><span><i className="stock-in-legend" />Stock in</span><span><i className="stock-out-legend" />Stock out</span></div>
+  </div>
 }
 
 function ReportTable({ headers, rows, emptyMessage, className = '' }) {
