@@ -4,7 +4,7 @@ import { createCategory, deleteCategory as deleteCategoryFromApi, getCategories,
 import { createProduct, deleteProduct as deleteProductFromApi, getProducts, updateProduct } from './productService'
 import { createSupplier, deleteSupplier as deleteSupplierFromApi, getSuppliers, updateSupplier } from './supplierService'
 import { createPurchaseOrder, getPurchaseOrders, receivePurchaseOrder, updatePurchaseOrder, updatePurchaseOrderStatus as updatePurchaseOrderStatusFromApi } from './purchaseOrderService'
-import { getStockMovements, recordStockMovement } from './stockMovementService'
+import { createStockMovementIdempotencyKey, getStockMovements, recordStockMovement } from './stockMovementService'
 const navigationItems = [
   { id: 'dashboard', label: 'Dashboard', icon: '▦' },
   { id: 'products', label: 'Products', icon: '□' },
@@ -70,14 +70,35 @@ const emptyReportFilters = {
 }
 
 function getStockStatus(product) {
-  if (product.quantity === 0) return 'out'
-  if (product.quantity <= product.reorderThreshold) return 'low'
-  return 'in-stock'
+  const quantity = parseNonNegativeInteger(product.quantity)
+  if (quantity === null) return 'unknown'
+  if (quantity === 0) return 'out'
+  const reorderLevel = parseNonNegativeInteger(product.reorderThreshold)
+    ?? parseNonNegativeInteger(product.reorder_level)
+  if (reorderLevel === null) return 'unknown'
+  return quantity <= reorderLevel ? 'low' : 'in-stock'
+}
+
+function filterProducts(products, { searchText = '', category = 'all', supplier = 'all' } = {}) {
+  const normalizedSearch = normalizeText(searchText)
+  return products.filter((product) => {
+    const matchesSearch = normalizeText(`${product.name ?? ''} ${product.sku ?? ''}`).includes(normalizedSearch)
+    const matchesCategory = category === 'all' || product.category === category
+    const matchesSupplier = supplier === 'all' || normalizeText(product.supplier) === normalizeText(supplier)
+    return matchesSearch && matchesCategory && matchesSupplier
+  })
+}
+
+function parseNonNegativeInteger(value) {
+  if (typeof value === 'string' && !value.trim()) return null
+  if (typeof value !== 'number' && typeof value !== 'string') return null
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null
 }
 
 function getStockLabel(product) {
   const status = getStockStatus(product)
-  return status === 'out' ? 'Out of stock' : status === 'low' ? 'Low stock' : 'In stock'
+  return status === 'out' ? 'Out of stock' : status === 'low' ? 'Low stock' : status === 'unknown' ? 'Unknown stock' : 'In stock'
 }
 
 function getSuggestedReorderQuantity(product) {
@@ -154,20 +175,31 @@ function getSupplierRoute(pathname = window.location.pathname) {
   const match = pathname.match(/^\/suppliers\/(\d+)(\/edit)?\/?$/)
   return match ? { id: Number(match[1]), mode: match[2] ? 'edit' : 'view' } : null
 }
-
+function getProductRoute(pathname = window.location.pathname) {
+  const match = pathname.match(/^\/products\/(\d+)(\/edit)?\/?$/)
+  return match
+    ? { id: Number(match[1]), mode: match[2] ? 'edit' : 'view' }
+    : null
+}
 function InventoryApp() {
   const [products, setProducts] = useState([])
   const [productsLoading, setProductsLoading] = useState(true)
   const [productLoadError, setProductLoadError] = useState('')
+  const productRefreshVersionRef = useRef(0)
   const [categoryRecords, setCategoryRecords] = useState(initialCategories)
   const [categoryLoadError, setCategoryLoadError] = useState('')
   const [suppliers, setSuppliers] = useState(initialSuppliers)
   const [stockMovements, setStockMovements] = useState([])
-  const [activePage, setActivePage] = useState(() => getSupplierRoute() ? 'suppliers' : 'dashboard')
+ const [activePage, setActivePage] = useState(() => {
+  if (getSupplierRoute()) return 'suppliers'
+  if (getProductRoute()) return 'products'
+  return 'dashboard'
+})
+const [productRoute, setProductRoute] = useState(() => getProductRoute())
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const [search, setSearch] = useState('')
   const [categoryFilter, setCategoryFilter] = useState('all')
-  const [statusFilter, setStatusFilter] = useState('all')
+  const [supplierFilter, setSupplierFilter] = useState('all')
   const [sortBy, setSortBy] = useState('name')
   const [sortDirection, setSortDirection] = useState('asc')
   const [showForm, setShowForm] = useState(false)
@@ -176,8 +208,14 @@ function InventoryApp() {
   const [form, setForm] = useState(emptyForm)
   const [errors, setErrors] = useState({})
   const [successMessage, setSuccessMessage] = useState('')
+  const [productSaveWarning, setProductSaveWarning] = useState('')
+  const [productSubmitting, setProductSubmitting] = useState(false)
   const [movementForm, setMovementForm] = useState(emptyMovementForm)
   const [movementErrors, setMovementErrors] = useState({})
+  const [movementSubmitting, setMovementSubmitting] = useState(false)
+  const [movementRefreshWarning, setMovementRefreshWarning] = useState('')
+  const movementSubmitRef = useRef(false)
+  const pendingMovementRef = useRef(null)
   const [categorySearch, setCategorySearch] = useState('')
   const [categoryForm, setCategoryForm] = useState({ name: '', description: '' })
   const [editingCategory, setEditingCategory] = useState(null)
@@ -212,12 +250,23 @@ function InventoryApp() {
   const supplierSubmitRef = useRef(false)
   const supplierDeleteRef = useRef(null)
   useEffect(() => {
-    function handlePopState() {
-      setSupplierRoute(getSupplierRoute())
+  function handlePopState() {
+    const nextSupplierRoute = getSupplierRoute()
+    const nextProductRoute = getProductRoute()
+
+    setSupplierRoute(nextSupplierRoute)
+    setProductRoute(nextProductRoute)
+
+    if (nextSupplierRoute) {
+      setActivePage('suppliers')
+    } else if (nextProductRoute) {
+      setActivePage('products')
     }
-    window.addEventListener('popstate', handlePopState)
-    return () => window.removeEventListener('popstate', handlePopState)
-  }, [])
+  }
+
+  window.addEventListener('popstate', handlePopState)
+  return () => window.removeEventListener('popstate', handlePopState)
+}, [])
 
   useEffect(() => {
     if (!supplierRoute) return
@@ -247,7 +296,26 @@ function InventoryApp() {
     return () => window.clearTimeout(timer)
   }, [supplierRoute, suppliers])
   useEffect(() => {
+  if (!productRoute) return
+
+  const product = products.find(
+    (item) => Number(item.id) === productRoute.id
+  )
+
+  if (!product) return
+
+  if (productRoute.mode === 'edit') {
+    setSelectedProduct(null)
+    openEditForm(product)
+  } else {
+    setShowForm(false)
+    setEditingProduct(null)
+    setSelectedProduct(product)
+  }
+}, [productRoute, products])
+  useEffect(() => {
     let cancelled = false
+    const productRequestVersion = productRefreshVersionRef.current
     Promise.allSettled([getCategories(), getProducts(), getSuppliers(), getPurchaseOrders(), getStockMovements()])
       .then((results) => {
         if (cancelled) return
@@ -255,13 +323,15 @@ function InventoryApp() {
         if (categoriesResult.status === 'fulfilled') {
           setCategoryRecords(categoriesResult.value.map((category) => ({ ...category, createdAt: category.created_at ?? category.createdAt })))
         }
-        if (productsResult.status === 'fulfilled') {
-          setProducts(productsResult.value)
-          setProductLoadError('')
-        } else {
-          setProductLoadError(productsResult.reason instanceof Error
-            ? productsResult.reason.message
-            : 'Unable to load products from the backend.')
+        if (productRequestVersion === productRefreshVersionRef.current) {
+          if (productsResult.status === 'fulfilled') {
+            setProducts(productsResult.value)
+            setProductLoadError('')
+          } else {
+            setProductLoadError(productsResult.reason instanceof Error
+              ? productsResult.reason.message
+              : 'Unable to load products from the backend.')
+          }
         }
         setProductsLoading(false)
         if (suppliersResult.status === 'fulfilled') setSuppliers(suppliersResult.value)
@@ -276,22 +346,28 @@ function InventoryApp() {
   }, [])
 
   async function refreshProducts() {
+    const requestVersion = ++productRefreshVersionRef.current
     try {
-      setProducts(await getProducts())
-      setProductLoadError('')
+      const latestProducts = await getProducts()
+      if (requestVersion === productRefreshVersionRef.current) {
+        setProducts(latestProducts)
+        setProductLoadError('')
+      }
+      return true
     } catch (error) {
-      setProductLoadError(error instanceof Error ? error.message : 'Unable to refresh products from the backend.')
+      if (requestVersion === productRefreshVersionRef.current) {
+        setProductLoadError(error instanceof Error ? error.message : 'Unable to refresh products from the backend.')
+      }
+      console.error('Failed to refresh products:', error)
+      return false
     }
   }
 
-  const filteredProducts = products
-    .filter((product) => {
-      const searchText = `${product.name ?? ''} ${product.sku ?? ''}`.toLowerCase()
-      const matchesSearch = searchText.includes(normalizeText(search))
-      const matchesCategory = categoryFilter === 'all' || product.category === categoryFilter
-      const matchesStatus = statusFilter === 'all' || getStockStatus(product) === statusFilter
-      return matchesSearch && matchesCategory && matchesStatus
-    })
+  const filteredProducts = filterProducts(products, {
+    searchText: search,
+    category: categoryFilter,
+    supplier: supplierFilter,
+  })
     .sort((first, second) => {
       const firstValue = sortBy === 'name' || sortBy === 'category'
         ? normalizeText(first[sortBy]) : first[sortBy]
@@ -306,6 +382,9 @@ function InventoryApp() {
   const lowStockProducts = products.filter((product) => getStockStatus(product) === 'low')
   const outOfStockProducts = products.filter((product) => getStockStatus(product) === 'out')
   const categoryOptions = categoryRecords.map((category) => category?.name).filter(Boolean)
+  const productSupplierOptions = [...new Set(products
+    .map((product) => product.supplier)
+    .filter((supplier) => typeof supplier === 'string' && supplier.trim()))]
   const visibleCategories = categoryRecords.filter((category) =>
     normalizeText(category?.name).includes(normalizeText(categorySearch))
   )
@@ -324,6 +403,7 @@ function InventoryApp() {
 
   function handleNavigation(pageId) {
     if (pageId !== 'suppliers' && supplierRoute) clearSupplierRoute()
+    if (pageId === 'products' || pageId === 'stock') void refreshProducts()
     setActivePage(pageId)
     setIsSidebarOpen(false)
     setSelectedProduct(null)
@@ -341,12 +421,31 @@ function InventoryApp() {
     if (getSupplierRoute()) window.history.pushState({}, '', '/')
     setSupplierRoute(null)
   }
+    function navigateProductRoute(productId, mode) {
+    const path = mode === 'edit'
+      ? `/products/${productId}/edit`
+      : `/products/${productId}`
+
+    window.history.pushState({}, '', path)
+    setProductRoute({ id: Number(productId), mode })
+    setActivePage('products')
+    setIsSidebarOpen(false)
+  }
+
+  function clearProductRoute() {
+    if (getProductRoute()) window.history.pushState({}, '', '/')
+    setProductRoute(null)
+    setSelectedProduct(null)
+    setShowForm(false)
+    setEditingProduct(null)
+  }
 
   function openAddForm() {
     setEditingProduct(null)
     setForm(emptyForm)
     setErrors({})
     setSuccessMessage('')
+    setProductSaveWarning('')
     setShowForm(true)
     setSelectedProduct(null)
   }
@@ -362,16 +461,21 @@ function InventoryApp() {
     })
     setErrors({})
     setSuccessMessage('')
+    setProductSaveWarning('')
     setShowForm(true)
     setSelectedProduct(null)
   }
 
   function closeForm() {
+  if (getProductRoute()) {
+    clearProductRoute()
+  } else {
     setShowForm(false)
     setEditingProduct(null)
     setForm(emptyForm)
     setErrors({})
   }
+}
 
   function resetCategoryForm() {
     setCategoryForm({ name: '', description: '' })
@@ -745,14 +849,14 @@ function InventoryApp() {
     if (!trimmedSku) nextErrors.sku = 'Enter a unique SKU.'
     else if (duplicateSku) nextErrors.sku = 'This SKU is already used by another product.'
     if (!form.category) nextErrors.category = 'Choose a category.'
-    if (form.quantity === '' || !Number.isInteger(Number(form.quantity)) || Number(form.quantity) < 0) {
-      nextErrors.quantity = 'Use a non-negative whole number.'
+    if (form.quantity === '' || !Number.isSafeInteger(Number(form.quantity)) || Number(form.quantity) < 0 || Number(form.quantity) > 2147483647) {
+      nextErrors.quantity = 'Use a non-negative whole number within the supported range.'
     }
-    if (form.reorderThreshold === '' || !Number.isInteger(Number(form.reorderThreshold)) || Number(form.reorderThreshold) < 0) {
-      nextErrors.reorderThreshold = 'Use a non-negative whole number.'
+    if (form.reorderThreshold === '' || !Number.isSafeInteger(Number(form.reorderThreshold)) || Number(form.reorderThreshold) < 0 || Number(form.reorderThreshold) > 2147483647) {
+      nextErrors.reorderThreshold = 'Use a non-negative whole number within the supported range.'
     }
-    if (form.price === '' || !Number.isFinite(Number(form.price)) || Number(form.price) < 0) {
-      nextErrors.price = 'Use a valid non-negative price.'
+    if (form.price === '' || !Number.isFinite(Number(form.price)) || Number(form.price) < 0 || (!editingProduct && Number(form.price) === 0)) {
+      nextErrors.price = editingProduct ? 'Use a valid non-negative price.' : 'Enter a unit price greater than zero.'
     }
     if (form.imageUrl.trim()) {
       try {
@@ -770,33 +874,71 @@ function InventoryApp() {
     if (productSubmitRef.current) return
     setSuccessMessage('')
     if (!validateForm()) return
+    const initialQuantity = Number(form.quantity)
     const productData = {
       name: form.name.trim(), sku: form.sku.trim(), category: form.category,
-      description: form.description.trim(), quantity: Number(form.quantity),
+      description: form.description.trim(), quantity: editingProduct ? initialQuantity : 0,
       price: Number(form.price), supplier: form.supplier.trim() || 'Not specified',
       reorderThreshold: Number(form.reorderThreshold), condition: form.condition,
       department: form.department, imageUrl: form.imageUrl.trim(),
     }
 
     productSubmitRef.current = true
+    setProductSubmitting(true)
     try {
       const savedProduct = editingProduct
         ? await updateProduct(editingProduct.id, productData)
         : await createProduct(productData)
+      const productRefreshVersion = ++productRefreshVersionRef.current
       setProducts((current) => editingProduct
         ? current.map((product) => product.id === editingProduct.id ? savedProduct : product)
         : [...current, savedProduct])
-      await refreshProducts()
-      setSuccessMessage(`${productData.name} was ${editingProduct ? 'updated' : 'added'} successfully.`)
+
+      if (!editingProduct && initialQuantity > 0) {
+        try {
+          await recordStockMovement({
+            productId: savedProduct.id,
+            type: 'Stock in',
+            quantity: initialQuantity,
+            reference: 'Initial inventory',
+            department: form.department,
+            remarks: 'Opening stock recorded when product was created.',
+            idempotencyKey: createStockMovementIdempotencyKey(),
+          })
+          setSuccessMessage(`${productData.name} was added and its ${initialQuantity} initial unit(s) were recorded as stock in.`)
+        } catch (error) {
+          console.error('Product was created, but its initial stock could not be recorded:', error)
+          setProductSaveWarning(`Product "${productData.name}" was created, but the initial ${initialQuantity} unit(s) could not be confirmed as stock in. Check its current quantity and movement history before retrying. ${error instanceof Error ? error.message : ''}`.trim())
+          setSuccessMessage(`${productData.name} was added; initial stock was not confirmed.`)
+        }
+      } else {
+        setSuccessMessage(`${productData.name} was ${editingProduct ? 'updated' : 'added'} successfully.`)
+      }
+
+      try {
+        const refreshedProducts = await getProducts()
+        if (productRefreshVersion === productRefreshVersionRef.current) {
+          setProducts(refreshedProducts)
+          setProductLoadError('')
+        }
+      } catch (error) {
+        console.error('Product was saved, but the product list could not be refreshed:', error)
+        setProductSaveWarning((current) => [
+          current,
+          `The product was saved, but the Products list could not be refreshed. ${error instanceof Error ? error.message : 'Refresh the page to reload products.'}`,
+        ].filter(Boolean).join(' '))
+      }
       setForm(emptyForm)
       setErrors({})
       setShowForm(false)
       setEditingProduct(null)
+      if (getProductRoute()) clearProductRoute()
     } catch (error) {
       console.error('Failed to save product:', error)
       setErrors({ form: error instanceof Error ? error.message : 'Unable to save product.' })
     } finally {
       productSubmitRef.current = false
+      setProductSubmitting(false)
     }
   }
 
@@ -819,33 +961,73 @@ function InventoryApp() {
 
   async function handleMovementSubmit(event) {
     event.preventDefault()
+    if (movementSubmitRef.current) return
     const errorsForMovement = {}
     const quantity = Number(movementForm.quantity)
     const product = products.find((item) => item.id === Number(movementForm.productId))
 
     if (!product) errorsForMovement.productId = 'Select a product.'
-    if (movementForm.quantity === '' || !Number.isInteger(quantity) || quantity <= 0) {
+    if (movementForm.quantity === '' || !Number.isSafeInteger(quantity) || quantity <= 0 || quantity > 2147483647) {
       errorsForMovement.quantity = 'Enter a positive whole number.'
+    } else if (movementForm.type === 'Stock out' && product && quantity > product.quantity) {
+      errorsForMovement.quantity = `Only ${product.quantity} unit${product.quantity === 1 ? '' : 's'} available.`
     }
     setMovementErrors(errorsForMovement)
     if (Object.keys(errorsForMovement).length > 0) return
+
+    const request = {
+      productId: product.id,
+      type: movementForm.type,
+      quantity,
+      reference: movementForm.reference.trim(),
+      department: movementForm.department,
+      remarks: movementForm.remarks.trim(),
+    }
+    const fingerprint = JSON.stringify(request)
+    movementSubmitRef.current = true
+    setMovementSubmitting(true)
+    setMovementRefreshWarning('')
+    setSuccessMessage('')
     try {
+      if (pendingMovementRef.current?.fingerprint !== fingerprint) {
+        pendingMovementRef.current = {
+          fingerprint,
+          idempotencyKey: createStockMovementIdempotencyKey(),
+        }
+      }
       const result = await recordStockMovement({
-        productId: product.id,
-        type: movementForm.type,
-        quantity,
-        idempotencyKey: `${product.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        ...request,
+        idempotencyKey: pendingMovementRef.current.idempotencyKey,
       })
-      const [updatedProducts, updatedMovements] = await Promise.all([getProducts(), getStockMovements()])
-      setProducts(updatedProducts)
-      setStockMovements(updatedMovements)
+      pendingMovementRef.current = null
+      if (Number.isInteger(result.resultingQuantity)) {
+        setProducts((current) => current.map((item) => item.id === product.id
+          ? { ...item, quantity: result.resultingQuantity }
+          : item))
+      }
       setMovementForm(emptyMovementForm)
       setMovementErrors({})
-      setSuccessMessage(`${movementForm.type} recorded for ${product.name}.`)
+      const balanceMessage = Number.isInteger(result.previousQuantity) && Number.isInteger(result.resultingQuantity)
+        ? ` Stock changed from ${result.previousQuantity} to ${result.resultingQuantity}.`
+        : ''
+      setSuccessMessage(`${movementForm.type} recorded for ${product.name}.${balanceMessage}`)
+
+      const [productsResult, movementsResult] = await Promise.allSettled([refreshProducts(), getStockMovements()])
+      if (movementsResult.status === 'fulfilled') setStockMovements(movementsResult.value)
+      if (productsResult.status === 'rejected' || !productsResult.value || movementsResult.status === 'rejected') {
+        console.error('Stock movement was recorded, but inventory refresh failed:', {
+          productsError: productsResult.status === 'rejected' ? productsResult.reason : productsResult.value ? null : 'Product refresh failed.',
+          movementsError: movementsResult.status === 'rejected' ? movementsResult.reason : null,
+        })
+        setMovementRefreshWarning('The stock movement was recorded, but inventory or movement history could not be fully refreshed. Refresh the page before relying on the displayed values.')
+      }
       return result
     } catch (error) {
       console.error('Failed to record stock movement:', error)
       setMovementErrors({ form: error instanceof Error ? error.message : 'Unable to record stock movement.' })
+    } finally {
+      movementSubmitRef.current = false
+      setMovementSubmitting(false)
     }
   }
 
@@ -861,7 +1043,7 @@ function InventoryApp() {
   function clearFilters() {
     setSearch('')
     setCategoryFilter('all')
-    setStatusFilter('all')
+    setSupplierFilter('all')
     setSortBy('name')
     setSortDirection('asc')
   }
@@ -888,27 +1070,59 @@ function InventoryApp() {
         <header className="topbar">
           <button className="menu-button" aria-label="Open navigation" onClick={() => setIsSidebarOpen(true)}>☰</button>
           <div className="page-heading"><p className="eyebrow">WORKSPACE / {activeItem.label.toUpperCase()}</p><h1>{isDashboard ? 'Inventory Dashboard' : activeItem.label}</h1><p className="subtitle">{isDashboard ? 'Monitor your products and stock levels.' : isProducts ? 'Manage and monitor your current stock.' : activePage === 'stock' ? 'Record stock in, stock out, and review inventory history.' : activePage === 'categories' ? 'Organize products with reusable inventory categories.' : activePage === 'suppliers' ? 'Manage supplier contacts and product assignments.' : isPurchaseOrders ? 'Create orders, track delivery, and receive inventory.' : isReports ? 'Review current inventory, stock activity, and purchasing data.' : isNotifications ? 'Review current stock alerts and create replenishment drafts.' : 'This workspace is planned for a future phase.'}</p></div>
-          <div className="topbar-actions">{isDashboard && <><button className="secondary-button" onClick={() => handleNavigation('notifications')}>Alerts: {productAlertCount} products · {outstandingOrderCount} orders</button><button className="primary-button" onClick={openAddForm}>+ Add Product</button></>}</div>
+          <div className="topbar-actions">{isDashboard && <><button className="secondary-button" onClick={() => handleNavigation('notifications')}>Alerts: {productAlertCount} products · {outstandingOrderCount} orders</button><button className="primary-button" onClick={openAddForm}>+ Add Product</button></>}{isProducts && !productRoute && <button className="primary-button" onClick={openAddForm}>+ Add Product</button>}</div>
         </header>
 
         {successMessage && <div className="success-message" role="status">{successMessage}</div>}
+        {productSaveWarning && <div className="error-message" role="alert">{productSaveWarning}</div>}
+        {movementRefreshWarning && <div className="error-message" role="alert">{movementRefreshWarning}</div>}
         {categoryLoadError && <div className="error-message" role="alert">{categoryLoadError}</div>}
         {productLoadError && <div className="error-message" role="alert">Products could not be loaded: {productLoadError}</div>}
         {productsLoading && <div className="loading-message" role="status">Loading products from the backend…</div>}
 
-        {(isProducts || (isDashboard && showForm)) && <ProductForm categories={categoryOptions} suppliers={suppliers} form={form} setForm={setForm} errors={errors} editingProduct={editingProduct} onSubmit={handleSubmit} onCancel={closeForm} />}
+       {showForm && (isDashboard || isProducts) && (
+  <ProductForm
+    categories={categoryOptions}
+    suppliers={suppliers}
+    form={form}
+    setForm={setForm}
+    errors={errors}
+    editingProduct={editingProduct}
+    submitting={productSubmitting}
+    onSubmit={handleSubmit}
+    onCancel={closeForm}
+  />
+)}
 
         {isDashboard && <Dashboard products={products} totalUnits={totalUnits} inventoryValue={inventoryValue} lowStockProducts={lowStockProducts} outOfStockProducts={outOfStockProducts} stockMovements={stockMovements} productAlertCount={productAlertCount} outstandingOrderCount={outstandingOrderCount} onProducts={() => handleNavigation('products')} onStock={() => handleNavigation('stock')} onNotifications={() => handleNavigation('notifications')} onView={setSelectedProduct} />}
 
         {isProducts && (
           <>
-            <ProductFilters categories={categoryOptions} search={search} setSearch={setSearch} categoryFilter={categoryFilter} setCategoryFilter={setCategoryFilter} statusFilter={statusFilter} setStatusFilter={setStatusFilter} sortBy={sortBy} sortDirection={sortDirection} onSort={handleSortChange} onClear={clearFilters} />
-            {selectedProduct && <ProductDetails product={selectedProduct} onClose={() => setSelectedProduct(null)} onEdit={() => openEditForm(selectedProduct)} onDelete={() => deleteProduct(selectedProduct)} />}
-            <ProductTable products={products} filteredProducts={filteredProducts} onView={setSelectedProduct} onEdit={openEditForm} onDelete={deleteProduct} />
+          {!productRoute && (
+          <ProductFilters categories={categoryOptions} suppliers={productSupplierOptions} search={search} setSearch={setSearch} categoryFilter={categoryFilter} setCategoryFilter={setCategoryFilter} supplierFilter={supplierFilter} setSupplierFilter={setSupplierFilter} sortBy={sortBy} sortDirection={sortDirection} onSort={handleSortChange} onClear={clearFilters} />
+          )}
+
+           {productRoute?.mode === 'view' && selectedProduct && (
+  <ProductDetails
+    product={selectedProduct}
+    onClose={clearProductRoute}
+    onEdit={() => navigateProductRoute(selectedProduct.id, 'edit')}
+    onDelete={() => deleteProduct(selectedProduct)}
+  />
+)}
+            {!productRoute && (
+  <ProductTable
+    products={products}
+    filteredProducts={filteredProducts}
+    onView={(product) => navigateProductRoute(product.id, 'view')}
+    onEdit={(product) => navigateProductRoute(product.id, 'edit')}
+    onDelete={deleteProduct}
+  />
+)}
           </>
         )}
 
-        {activePage === 'stock' && <StockManagement products={products} movementForm={movementForm} setMovementForm={setMovementForm} errors={movementErrors} onSubmit={handleMovementSubmit} movements={stockMovements} />}
+        {activePage === 'stock' && <StockManagement products={products} movementForm={movementForm} setMovementForm={setMovementForm} errors={movementErrors} submitting={movementSubmitting} onSubmit={handleMovementSubmit} movements={stockMovements} />}
         {activePage === 'categories' && <CategoryManagement categories={visibleCategories} search={categorySearch} setSearch={setCategorySearch} form={categoryForm} setForm={setCategoryForm} errors={categoryErrors} editingCategory={editingCategory} onSubmit={submitCategory} onEdit={editCategory} onDelete={deleteCategory} onCancel={resetCategoryForm} />}
         {activePage === 'suppliers' && <SupplierManagement suppliers={visibleSuppliers} products={products} categories={categoryOptions} search={supplierSearch} setSearch={setSupplierSearch} form={supplierForm} setForm={setSupplierForm} errors={supplierErrors} editingSupplier={editingSupplier} selectedSupplier={selectedSupplier} onSelect={(supplier) => supplier ? navigateSupplierRoute(supplier.id, 'view') : clearSupplierRoute()} showForm={showSupplierForm} onAdd={() => openSupplierForm()} onEdit={(supplier) => navigateSupplierRoute(supplier.id, 'edit')} onDelete={deleteSupplier} onSubmit={submitSupplier} onCancel={closeSupplierForm} />}
         {isPurchaseOrders && <PurchaseOrderManagement orders={visiblePurchaseOrders} allOrders={purchaseOrders} products={products} suppliers={suppliers} search={purchaseOrderSearch} setSearch={setPurchaseOrderSearch} statusFilter={purchaseOrderStatusFilter} setStatusFilter={setPurchaseOrderStatusFilter} form={purchaseOrderForm} setForm={setPurchaseOrderForm} errors={purchaseOrderErrors} editingOrder={editingPurchaseOrder} selectedOrder={selectedPurchaseOrder} showForm={showPurchaseOrderForm} receiveForm={receiveForm} setReceiveForm={setReceiveForm} receiveErrors={receiveErrors} receiveSubmitting={receiveSubmitting} onAdd={() => openPurchaseOrderForm()} onEdit={openPurchaseOrderForm} onSelect={setSelectedPurchaseOrder} onSubmit={submitPurchaseOrder} onCancel={closePurchaseOrderForm} onPlace={(order) => updatePurchaseOrderStatus(order, 'Ordered')} onCancelOrder={(order) => updatePurchaseOrderStatus(order, 'Cancelled')} onReceive={openReceiveForm} onReceiveSubmit={submitReceipt} onReceiveCancel={() => { setReceiveForm(null); setReceiveErrors({}) }} />}
@@ -973,9 +1187,21 @@ function NotificationsPage({ products, orders, suppliers, reorderQuantities, set
   </section>
 }
 
-function StockManagement({ products, movementForm, setMovementForm, errors, onSubmit, movements }) {
+function StockManagement({ products, movementForm, setMovementForm, errors, submitting, onSubmit, movements }) {
+  const [productSearch, setProductSearch] = useState('')
+  const visibleProducts = filterProducts(products, { searchText: productSearch })
+  const normalizedProductSearch = normalizeText(productSearch)
+
   function updateField(field, value) {
     setMovementForm((current) => ({ ...current, [field]: value }))
+  }
+
+  function updateProductSearch(value) {
+    setProductSearch(value)
+    const selectedProduct = products.find((product) => product.id === Number(movementForm.productId))
+    if (selectedProduct && !normalizeText(`${selectedProduct.name ?? ''} ${selectedProduct.sku ?? ''}`).includes(normalizeText(value))) {
+      updateField('productId', '')
+    }
   }
 
   return (
@@ -985,13 +1211,23 @@ function StockManagement({ products, movementForm, setMovementForm, errors, onSu
         {errors.form && <p className="field-error" role="alert">{errors.form}</p>}
         <form onSubmit={onSubmit} noValidate>
           <SelectField id="movement-type" label="Movement type" value={movementForm.type} onChange={(value) => updateField('type', value)} options={['Stock in', 'Stock out']} />
-          <label htmlFor="movement-product">Product *<select id="movement-product" value={movementForm.productId} onChange={(event) => updateField('productId', event.target.value)} aria-invalid={Boolean(errors.productId)}><option value="">Select a product</option>{products.map((product) => <option value={product.id} key={product.id}>{product.name} ({product.sku}) · {product.quantity} available</option>)}</select>{errors.productId && <span className="field-error">{errors.productId}</span>}</label>
+          <label htmlFor="movement-product">Product *<select id="movement-product" value={movementForm.productId} onChange={(event) => updateField('productId', event.target.value)} aria-invalid={Boolean(errors.productId)}><option value="">{visibleProducts.length === 0 && normalizedProductSearch ? 'No matching products' : 'Select a product'}</option>{visibleProducts.map((product) => <option value={product.id} key={product.id}>{product.name} ({product.sku}) · {product.quantity} available</option>)}</select>{errors.productId && <span className="field-error">{errors.productId}</span>}</label>
           <FormField id="movement-quantity" label="Quantity *" type="number" min="1" step="1" value={movementForm.quantity} onChange={(value) => updateField('quantity', value)} error={errors.quantity} placeholder="Enter whole units" />
           <FormField id="movement-reference" label="Reference / request number" value={movementForm.reference} onChange={(value) => updateField('reference', value)} placeholder="Optional reference" />
           <SelectField id="movement-department" label="Department" value={movementForm.department} onChange={(value) => updateField('department', value)} options={departments} />
           <div className="form-wide"><label htmlFor="movement-remarks">Remarks<textarea id="movement-remarks" rows="3" value={movementForm.remarks} onChange={(event) => updateField('remarks', event.target.value)} placeholder="Optional notes about this movement" /></label></div>
-          <div className="form-actions"><button type="submit" className="primary-button">Record {movementForm.type}</button></div>
+          <div className="form-actions"><button type="submit" className="primary-button" disabled={submitting}>{submitting ? 'Recording...' : `Record ${movementForm.type}`}</button></div>
         </form>
+      </section>
+      <section className="stock-product-tools" aria-label="Filter stock movement products">
+        <div className="stock-product-picker">
+          <label htmlFor="stock-product-search">Search products</label>
+          <div className="stock-product-search-control">
+            <input id="stock-product-search" className="search" value={productSearch} onChange={(event) => updateProductSearch(event.target.value)} placeholder="Search by name or SKU..." />
+            {productSearch && <button className="stock-search-clear" type="button" aria-label="Clear product search" onClick={() => updateProductSearch('')}>×</button>}
+          </div>
+        </div>
+        {visibleProducts.length === 0 && <p className="field-helper stock-product-empty" role="status">{normalizedProductSearch ? `No products match "${productSearch.trim()}".` : 'No products are available.'}</p>}
       </section>
       <MovementHistory movements={movements} />
     </section>
@@ -1232,21 +1468,36 @@ function SupplierDetails({ supplier, productCount, onClose, onEdit, onDelete }) 
   return <section className="details-card"><div className="details-header"><div><p className="eyebrow">SUPPLIER DETAILS</p><h2>{supplier.name}</h2></div><button className="close-button" aria-label="Close supplier details" onClick={onClose}>×</button></div><div className="details-grid supplier-details-grid"><DetailItem label="Contact person" value={supplier.contactPerson || 'Not specified'} /><DetailItem label="Phone" value={supplier.phone || 'Not specified'} /><DetailItem label="Email" value={supplier.email || 'Not specified'} /><DetailItem label="Categories" value={supplier.categories.length ? supplier.categories.join(', ') : 'Not specified'} /><DetailItem label="Created" value={formatDate(supplier.createdAt)} /><DetailItem label="Updated" value={formatDate(supplier.updatedAt)} /><DetailItem label="Assigned products" value={productCount} /><DetailItem label="Address" value={supplier.address || 'Not specified'} /><DetailItem label="Notes" value={supplier.notes || 'No notes provided.'} /></div><div className="details-actions"><button className="secondary-button" onClick={onDelete}>Delete supplier</button><button className="primary-button" onClick={onEdit}>Edit supplier</button></div></section>
 }
 
-function ProductFilters({ categories, search, setSearch, categoryFilter, setCategoryFilter, statusFilter, setStatusFilter, sortBy, sortDirection, onSort, onClear }) {
-  const hasFilters = search || categoryFilter !== 'all' || statusFilter !== 'all' || sortBy !== 'name' || sortDirection !== 'asc'
-  return <section className="filters-card"><div className="filter-field search-field"><label htmlFor="product-search">Search products</label><input id="product-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search by name or SKU..." /></div><div className="filter-field"><label htmlFor="category-filter">Category</label><select id="category-filter" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option value="all">All categories</option>{categories.map((category) => <option key={category}>{category}</option>)}</select></div><div className="filter-field"><label htmlFor="status-filter">Stock status</label><select id="status-filter" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="all">All statuses</option><option value="in-stock">In stock</option><option value="low">Low stock</option><option value="out">Out of stock</option></select></div><div className="filter-field"><label htmlFor="sort-products">Sort by</label><select id="sort-products" value={sortBy} onChange={onSort}><option value="name">Name ({sortDirection === 'asc' ? 'A-Z' : 'Z-A'})</option><option value="quantity">Quantity ({sortDirection === 'asc' ? 'low-high' : 'high-low'})</option><option value="price">Unit price ({sortDirection === 'asc' ? 'low-high' : 'high-low'})</option><option value="category">Category ({sortDirection === 'asc' ? 'A-Z' : 'Z-A'})</option></select></div>{hasFilters && <button className="secondary-button clear-button" onClick={onClear}>Clear filters</button>}</section>
+function ProductFilters({ categories, suppliers, search, setSearch, categoryFilter, setCategoryFilter, supplierFilter, setSupplierFilter, sortBy, sortDirection, onSort, onClear }) {
+  return (
+    <section className="filters-card">
+      <div className="filter-field search-field"><label htmlFor="product-search">Search products</label><input id="product-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search by name or SKU..." /></div>
+      <div className="filter-field"><label htmlFor="category-filter">Category</label><select id="category-filter" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option value="all">All categories</option>{categories.map((category) => <option key={category}>{category}</option>)}</select></div>
+      <div className="filter-field"><label htmlFor="supplier-filter">Supplier</label><select id="supplier-filter" value={supplierFilter} onChange={(event) => setSupplierFilter(event.target.value)}><option value="all">All suppliers</option>{suppliers.map((supplier) => <option key={supplier} value={supplier}>{supplier}</option>)}</select></div>
+      <div className="filter-field"><label htmlFor="sort-products">Sort by</label><select id="sort-products" value={sortBy} onChange={onSort}><option value="name">Name ({sortDirection === 'asc' ? 'A-Z' : 'Z-A'})</option><option value="quantity">Quantity ({sortDirection === 'asc' ? 'low-high' : 'high-low'})</option><option value="price">Unit price ({sortDirection === 'asc' ? 'low-high' : 'high-low'})</option><option value="category">Category ({sortDirection === 'asc' ? 'A-Z' : 'Z-A'})</option></select></div>
+      <button
+        className="clear-filter-button"
+        type="button"
+        aria-label="Clear Filter"
+        title="Clear Filter"
+        onClick={onClear}
+      >
+        ×
+      </button>
+    </section>
+  )
 }
 
-function ProductForm({ categories, suppliers, form, setForm, errors, editingProduct, onSubmit, onCancel }) {
+function ProductForm({ categories, suppliers, form, setForm, errors, editingProduct, submitting, onSubmit, onCancel }) {
   function updateField(field, value) {
     setForm((current) => ({ ...current, [field]: value }))
   }
   return <section className="form-card"><div className="section-heading"><div><h2>{editingProduct ? 'Edit product' : 'Add a new product'}</h2><p>Fields marked with * are required.</p></div></div><form onSubmit={onSubmit} noValidate>
     <FormField id="name" label="Product name *" value={form.name} onChange={(value) => updateField('name', value)} error={errors.name} placeholder="e.g. Monitor" />
     <FormField id="sku" label="SKU (Unique Product Code) *" helper="Enter a unique code, for example IT-LAP-001. Each product must have a different SKU." value={form.sku} onChange={(value) => updateField('sku', value)} error={errors.sku} placeholder="e.g. IT-MON-001" />
-    <FormField id="quantity" label="Quantity *" type="number" min="0" step="1" value={form.quantity} onChange={(value) => updateField('quantity', value)} error={errors.quantity} placeholder="0" />
+    <FormField id="quantity" label={editingProduct ? 'Quantity *' : 'Initial quantity *'} type="number" min="0" step="1" value={form.quantity} onChange={(value) => updateField('quantity', value)} error={errors.quantity} placeholder="0" />
     <FormField id="reorderThreshold" label="Reorder threshold *" type="number" min="0" step="1" value={form.reorderThreshold} onChange={(value) => updateField('reorderThreshold', value)} error={errors.reorderThreshold} placeholder="e.g. 5" />
-    <FormField id="price" label="Unit price (৳) *" type="number" min="0" step="0.01" value={form.price} onChange={(value) => updateField('price', value)} error={errors.price} placeholder="0.00" />
+    <FormField id="price" label="Unit price (৳) *" type="number" min={editingProduct ? '0' : '0.01'} step="0.01" value={form.price} onChange={(value) => updateField('price', value)} error={errors.price} placeholder="0.00" />
     <label htmlFor="supplier">Supplier<select id="supplier" value={form.supplier} onChange={(event) => updateField('supplier', event.target.value)}><option value="">No supplier selected</option>{form.supplier && !suppliers.some((supplier) => supplier.name === form.supplier) && <option value={form.supplier}>{form.supplier} (existing value)</option>}{suppliers.map((supplier) => <option value={supplier.name} key={supplier.id}>{supplier.name}</option>)}</select>{suppliers.length === 0 && <span className="field-helper">Add a supplier from the Suppliers page before assigning one to a product.</span>}</label>
     <SelectField id="category" label="Category *" value={form.category} onChange={(value) => updateField('category', value)} options={categories} error={errors.category} />
     <SelectField id="condition" label="Condition" value={form.condition} onChange={(value) => updateField('condition', value)} options={conditions} />
@@ -1254,7 +1505,7 @@ function ProductForm({ categories, suppliers, form, setForm, errors, editingProd
     <FormField id="imageUrl" label="Image URL (optional)" value={form.imageUrl} onChange={(value) => updateField('imageUrl', value)} error={errors.imageUrl} placeholder="https://example.com/image.jpg" />
     <div className="form-wide"><label htmlFor="description">Description<textarea id="description" rows="3" value={form.description} onChange={(event) => updateField('description', event.target.value)} placeholder="Brief description of this item" /></label></div>
     {form.imageUrl.trim() && <div className="form-wide"><ImagePreview src={form.imageUrl} alt="Product preview" /></div>}
-    <div className="form-actions"><button type="button" className="secondary-button" onClick={onCancel}>Cancel</button><button type="submit" className="primary-button">{editingProduct ? 'Update Product' : 'Save Product'}</button></div>
+    <div className="form-actions"><button type="button" className="secondary-button" onClick={onCancel} disabled={submitting}>Cancel</button><button type="submit" className="primary-button" disabled={submitting}>{submitting ? 'Saving...' : editingProduct ? 'Update Product' : 'Save Product'}</button></div>
   </form></section>
 }
 

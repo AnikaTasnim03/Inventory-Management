@@ -33,12 +33,19 @@ function validateProduct(body) {
   const errors = {};
   if (typeof body.name !== "string" || !body.name.trim()) errors.name = "Product name is required.";
   if (typeof body.sku !== "string" || !body.sku.trim()) errors.sku = "SKU is required.";
-  if (!Number.isInteger(Number(body.quantity)) || Number(body.quantity) < 0) errors.quantity = "Quantity must be a non-negative whole number.";
-  if (!Number.isFinite(Number(body.price)) || Number(body.price) < 0) errors.price = "Price must be a non-negative number.";
-  if (!Number.isInteger(Number(body.reorderThreshold)) || Number(body.reorderThreshold) < 0) errors.reorderThreshold = "Reorder threshold must be a non-negative whole number.";
+  if (!Number.isSafeInteger(Number(body.quantity)) || Number(body.quantity) < 0 || Number(body.quantity) > 2147483647) errors.quantity = "Quantity must be a non-negative whole number within the supported range.";
+  if (!Number.isFinite(Number(body.price)) || Number(body.price) <= 0) errors.price = "Price must be greater than zero.";
+  if (!Number.isSafeInteger(Number(body.reorderThreshold)) || Number(body.reorderThreshold) < 0 || Number(body.reorderThreshold) > 2147483647) errors.reorderThreshold = "Reorder threshold must be a non-negative whole number within the supported range.";
   if (body.imageUrl !== undefined && body.imageUrl !== null && typeof body.imageUrl !== "string") errors.imageUrl = "Image URL must be text.";
   if (typeof body.imageUrl === "string" && body.imageUrl.trim().length > 2048) errors.imageUrl = "Image URL must be 2048 characters or fewer.";
   return errors;
+}
+
+function getProductCreateErrorMessage(error) {
+  if (error?.code === "23503") return "The selected category or supplier is no longer available.";
+  if (error?.code === "42501") return "The database denied this product operation. Check the backend database permissions.";
+  if (error?.code === "22001") return "One or more product fields exceed the allowed length.";
+  return "Failed to create product.";
 }
 
 function normalizeImageUrl(value) {
@@ -131,7 +138,7 @@ router.post("/", async (req, res) => {
     return res.status(201).json(mapProduct(data));
   } catch (error) {
     console.error("Failed to create product:", error.message);
-    return res.status(500).json({ message: "Failed to create product." });
+    return res.status(500).json({ message: getProductCreateErrorMessage(error) });
   }
 });
 

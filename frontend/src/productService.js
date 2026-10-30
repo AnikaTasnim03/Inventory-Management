@@ -5,7 +5,7 @@ function normalizeProduct(product) {
 }
 
 export async function getProducts() {
-  const products = await apiRequest('/products')
+  const products = await apiRequest('/products', { cache: 'no-store' })
   return products.map(normalizeProduct)
 }
 
