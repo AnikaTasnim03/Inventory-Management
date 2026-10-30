@@ -1,25 +1,8 @@
 
-const path = require("path");
-require("dotenv").config({
-  path: path.join(__dirname, ".env"),
-});
+const supabase = require("./config/supabase");
 
-const { createClient } = require("@supabase/supabase-js");
-
-const url = process.env.SUPABASE_URL;
-const key = process.env.SUPABASE_PUBLISHABLE_KEY;
-
-async function testSupabase() {
-  if (!url || !key) {
-    console.error(
-      "Missing SUPABASE_URL or SUPABASE_PUBLISHABLE_KEY in backend/.env"
-    );
-    return;
-  }
-
-  const supabase = createClient(url, key);
-
-  console.log("Testing connection to Supabase...");
+async function testConnection() {
+  console.log("Testing the reusable Supabase connection...");
 
   const { data, error } = await supabase
     .from("categories")
@@ -28,14 +11,15 @@ async function testSupabase() {
 
   if (error) {
     console.error("Supabase query failed:", error.message);
-    console.error("Error code:", error.code || "Not provided");
+    process.exitCode = 1;
     return;
   }
 
-  console.log("Supabase API connection successful!");
-  console.log("Query completed. Rows returned:", data.length);
+  console.log("Supabase connection successful!");
+  console.log("Rows returned:", data.length);
 }
 
-testSupabase().catch((error) => {
-  console.error("Unexpected test error:", error.message);
+testConnection().catch((error) => {
+  console.error("Unexpected error:", error.message);
+  process.exitCode = 1;
 });

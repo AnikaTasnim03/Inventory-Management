@@ -1,6 +1,10 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import './App.css'
-
+import { createCategory, deleteCategory as deleteCategoryFromApi, getCategories, updateCategory } from './categoryService'
+import { createProduct, deleteProduct as deleteProductFromApi, getProducts, updateProduct } from './productService'
+import { createSupplier, deleteSupplier as deleteSupplierFromApi, getSuppliers, updateSupplier } from './supplierService'
+import { createPurchaseOrder, getPurchaseOrders, receivePurchaseOrder, updatePurchaseOrder, updatePurchaseOrderStatus as updatePurchaseOrderStatusFromApi } from './purchaseOrderService'
+import { getStockMovements, recordStockMovement } from './stockMovementService'
 const navigationItems = [
   { id: 'dashboard', label: 'Dashboard', icon: '▦' },
   { id: 'products', label: 'Products', icon: '□' },
@@ -32,40 +36,6 @@ const initialSuppliers = [
 
 const conditions = ['New', 'Good', 'Needs attention']
 const departments = ['Administration', 'IT', 'Network Operations', 'Monitoring', 'Other']
-
-// Temporary demonstration data. This is not connected to NTMC systems or a database.
-const initialProducts = [
-  {
-    id: 1, name: 'Dell Latitude Laptop', sku: 'IT-LAP-001', category: 'IT Equipment',
-    description: 'Business laptop for office and field work.', quantity: 6, price: 85000,
-    supplier: 'Demo Technology Supplier', reorderThreshold: 2, condition: 'Good',
-    department: 'IT', imageUrl: '/product-images/laptop.svg', createdAt: '2026-10-01', updatedAt: '2026-10-01',
-  },
-  {
-    id: 2, name: 'Managed Network Switch', sku: 'NET-SW-024', category: 'Networking',
-    description: 'Managed switch for network demonstration inventory.', quantity: 2, price: 18500,
-    supplier: 'Demo Network Supplier', reorderThreshold: 2, condition: 'New',
-    department: 'Network Operations', imageUrl: '/product-images/network-switch.svg', createdAt: '2026-10-03', updatedAt: '2026-10-03',
-  },
-  {
-    id: 3, name: 'A4 Copy Paper', sku: 'OFF-PAP-100', category: 'Office Supplies',
-    description: 'A4 paper ream for general office use.', quantity: 40, price: 650,
-    supplier: 'Demo Office Supplier', reorderThreshold: 10, condition: 'New',
-    department: 'Administration', imageUrl: '/product-images/office-paper.svg', createdAt: '2026-10-05', updatedAt: '2026-10-05',
-  },
-  {
-    id: 4, name: 'Ergonomic Office Chair', sku: 'FUR-CHR-008', category: 'Furniture',
-    description: 'Adjustable chair for workstation use.', quantity: 0, price: 12500,
-    supplier: 'Demo Furniture Supplier', reorderThreshold: 2, condition: 'Good',
-    department: 'Administration', imageUrl: '/product-images/office-chair.svg', createdAt: '2026-10-08', updatedAt: '2026-10-08',
-  },
-  {
-    id: 5, name: 'Fiber Optic Patch Cable', sku: 'TEL-FIB-015', category: 'Accessories',
-    description: 'Fiber patch cable for telecommunications equipment.', quantity: 3, price: 900,
-    supplier: 'Demo Telecom Supplier', reorderThreshold: 5, condition: 'New',
-    department: 'Monitoring', imageUrl: '/product-images/fiber-cable.svg', createdAt: '2026-10-10', updatedAt: '2026-10-10',
-  },
-]
 
 const emptyForm = {
   name: '', sku: '', category: initialCategories[0].name, description: '', quantity: '',
@@ -138,14 +108,6 @@ function getPurchaseOrderTotal(order) {
   return (order.lines || []).reduce((total, line) => total + (Number(line.orderedQuantity) || 0) * (Number(line.unitCost) || 0), 0)
 }
 
-function getNextOrderNumber(orders) {
-  const highestNumber = orders.reduce((highest, order) => {
-    const match = /^PO-\d{4}-(\d+)$/.exec(order.orderNumber || '')
-    return match ? Math.max(highest, Number(match[1])) : highest
-  }, 0)
-  return `PO-${new Date().getFullYear()}-${String(highestNumber + 1).padStart(4, '0')}`
-}
-
 function parseDateSafely(value) {
   if (!value) return null
   const date = new Date(value)
@@ -188,12 +150,20 @@ function downloadCsv(filename, headers, rows) {
   setTimeout(() => URL.revokeObjectURL(url), 0)
 }
 
-function App() {
-  const [products, setProducts] = useState(initialProducts)
+function getSupplierRoute(pathname = window.location.pathname) {
+  const match = pathname.match(/^\/suppliers\/(\d+)(\/edit)?\/?$/)
+  return match ? { id: Number(match[1]), mode: match[2] ? 'edit' : 'view' } : null
+}
+
+function InventoryApp() {
+  const [products, setProducts] = useState([])
+  const [productsLoading, setProductsLoading] = useState(true)
+  const [productLoadError, setProductLoadError] = useState('')
   const [categoryRecords, setCategoryRecords] = useState(initialCategories)
+  const [categoryLoadError, setCategoryLoadError] = useState('')
   const [suppliers, setSuppliers] = useState(initialSuppliers)
   const [stockMovements, setStockMovements] = useState([])
-  const [activePage, setActivePage] = useState('dashboard')
+  const [activePage, setActivePage] = useState(() => getSupplierRoute() ? 'suppliers' : 'dashboard')
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const [search, setSearch] = useState('')
   const [categoryFilter, setCategoryFilter] = useState('all')
@@ -216,6 +186,7 @@ function App() {
   const [supplierForm, setSupplierForm] = useState(emptySupplierForm)
   const [editingSupplier, setEditingSupplier] = useState(null)
   const [selectedSupplier, setSelectedSupplier] = useState(null)
+  const [supplierRoute, setSupplierRoute] = useState(() => getSupplierRoute())
   const [supplierErrors, setSupplierErrors] = useState({})
   const [showSupplierForm, setShowSupplierForm] = useState(false)
   const [purchaseOrders, setPurchaseOrders] = useState([])
@@ -234,6 +205,84 @@ function App() {
   const [reportFilters, setReportFilters] = useState(emptyReportFilters)
   const [reorderQuantities, setReorderQuantities] = useState({})
   const [reorderSuppliers, setReorderSuppliers] = useState({})
+  const categorySubmitRef = useRef(false)
+  const categoryDeleteRef = useRef(null)
+  const productSubmitRef = useRef(false)
+  const productDeleteRef = useRef(null)
+  const supplierSubmitRef = useRef(false)
+  const supplierDeleteRef = useRef(null)
+  useEffect(() => {
+    function handlePopState() {
+      setSupplierRoute(getSupplierRoute())
+    }
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
+
+  useEffect(() => {
+    if (!supplierRoute) return
+    const supplier = suppliers.find((item) => Number(item.id) === supplierRoute.id)
+    if (!supplier) return
+    const timer = window.setTimeout(() => {
+      if (supplierRoute.mode === 'edit') {
+        setSelectedSupplier(null)
+        setEditingSupplier(supplier)
+        setSupplierForm({
+          name: supplier.name,
+          contactPerson: supplier.contactPerson,
+          phone: supplier.phone,
+          email: supplier.email,
+          address: supplier.address,
+          categories: supplier.categories,
+          notes: supplier.notes,
+        })
+        setSupplierErrors({})
+        setShowSupplierForm(true)
+      } else {
+        setShowSupplierForm(false)
+        setEditingSupplier(null)
+        setSelectedSupplier(supplier)
+      }
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [supplierRoute, suppliers])
+  useEffect(() => {
+    let cancelled = false
+    Promise.allSettled([getCategories(), getProducts(), getSuppliers(), getPurchaseOrders(), getStockMovements()])
+      .then((results) => {
+        if (cancelled) return
+        const [categoriesResult, productsResult, suppliersResult, ordersResult, movementsResult] = results
+        if (categoriesResult.status === 'fulfilled') {
+          setCategoryRecords(categoriesResult.value.map((category) => ({ ...category, createdAt: category.created_at ?? category.createdAt })))
+        }
+        if (productsResult.status === 'fulfilled') {
+          setProducts(productsResult.value)
+          setProductLoadError('')
+        } else {
+          setProductLoadError(productsResult.reason instanceof Error
+            ? productsResult.reason.message
+            : 'Unable to load products from the backend.')
+        }
+        setProductsLoading(false)
+        if (suppliersResult.status === 'fulfilled') setSuppliers(suppliersResult.value)
+        if (ordersResult.status === 'fulfilled') setPurchaseOrders(ordersResult.value)
+        if (movementsResult.status === 'fulfilled') setStockMovements(movementsResult.value)
+        const failedSources = results.filter((result) => result.status === 'rejected')
+        setCategoryLoadError(failedSources.length
+          ? 'Some inventory data could not be loaded from Supabase. Check the backend connection before relying on displayed values.'
+          : '')
+      })
+    return () => { cancelled = true }
+  }, [])
+
+  async function refreshProducts() {
+    try {
+      setProducts(await getProducts())
+      setProductLoadError('')
+    } catch (error) {
+      setProductLoadError(error instanceof Error ? error.message : 'Unable to refresh products from the backend.')
+    }
+  }
 
   const filteredProducts = products
     .filter((product) => {
@@ -274,9 +323,23 @@ function App() {
   const outstandingOrderCount = awaitingPurchaseOrders.length
 
   function handleNavigation(pageId) {
+    if (pageId !== 'suppliers' && supplierRoute) clearSupplierRoute()
     setActivePage(pageId)
     setIsSidebarOpen(false)
     setSelectedProduct(null)
+  }
+
+  function navigateSupplierRoute(supplierId, mode) {
+    const path = mode === 'edit' ? `/suppliers/${supplierId}/edit` : `/suppliers/${supplierId}`
+    window.history.pushState({}, '', path)
+    setSupplierRoute({ id: Number(supplierId), mode })
+    setActivePage('suppliers')
+    setIsSidebarOpen(false)
+  }
+
+  function clearSupplierRoute() {
+    if (getSupplierRoute()) window.history.pushState({}, '', '/')
+    setSupplierRoute(null)
   }
 
   function openAddForm() {
@@ -316,8 +379,9 @@ function App() {
     setCategoryErrors({})
   }
 
-  function submitCategory(event) {
+  async function submitCategory(event) {
     event.preventDefault()
+    if (categorySubmitRef.current) return
     const name = categoryForm.name.trim()
     const duplicate = categoryRecords.some((category) =>
       normalizeText(category?.name) === normalizeText(name) &&
@@ -329,18 +393,52 @@ function App() {
     setCategoryErrors(nextErrors)
     if (Object.keys(nextErrors).length > 0) return
 
+    categorySubmitRef.current = true
     if (editingCategory) {
-      setCategoryRecords((current) => current.map((category) =>
-        category.id === editingCategory.id ? { ...category, name, description: categoryForm.description.trim() } : category
-      ))
-      setProducts((current) => current.map((product) =>
-        product.category === editingCategory.name ? { ...product, category: name } : product
-      ))
-      setSuccessMessage(`${name} was updated successfully.`)
+      try {
+        const updatedCategory = await updateCategory(editingCategory.id, {
+          name,
+          description: categoryForm.description.trim(),
+        })
+        const mappedCategory = {
+          ...updatedCategory,
+          createdAt: updatedCategory.created_at ?? updatedCategory.createdAt,
+        }
+        setCategoryRecords((current) => current.map((category) =>
+          category.id === editingCategory.id ? mappedCategory : category
+        ))
+        setProducts((current) => current.map((product) =>
+          product.category === editingCategory.name ? { ...product, category: name } : product
+        ))
+        setSuccessMessage(`${name} was updated successfully.`)
+      } catch (error) {
+        console.error('Failed to update category:', error)
+        setCategoryErrors({
+          name: `Unable to update category: ${error instanceof Error ? error.message : 'Please try again.'}`,
+        })
+        return
+      } finally {
+        categorySubmitRef.current = false
+      }
     } else {
-      setCategoryRecords((current) => [...current, {
-        id: Date.now(), name, description: categoryForm.description.trim() || 'No description provided.', createdAt: new Date().toISOString(),
-      }])
+      try {
+        const createdCategory = await createCategory({
+          name,
+          description: categoryForm.description.trim(),
+        })
+        setCategoryRecords((current) => [...current, {
+          ...createdCategory,
+          createdAt: createdCategory.created_at ?? createdCategory.createdAt,
+        }])
+      } catch (error) {
+        console.error('Failed to create category:', error)
+        setCategoryErrors({
+          name: `Unable to add category: ${error instanceof Error ? error.message : 'Please try again.'}`,
+        })
+        return
+      } finally {
+        categorySubmitRef.current = false
+      }
       setSuccessMessage(`${name} was added successfully.`)
     }
     resetCategoryForm()
@@ -352,19 +450,24 @@ function App() {
     setCategoryErrors({})
   }
 
-  function deleteCategory(category) {
-    const inUse = products.some((product) => product.category === category.name)
-    if (inUse) {
-      setSuccessMessage(`"${category.name}" cannot be deleted because products are assigned to it.`)
-      return
-    }
-    if (window.confirm(`Delete "${category.name}"? This cannot be undone.`)) {
+  async function deleteCategory(category) {
+    if (!window.confirm(`Delete "${category.name}"? This cannot be undone.`)) return
+    if (categoryDeleteRef.current === category.id) return
+    categoryDeleteRef.current = category.id
+    try {
+      await deleteCategoryFromApi(category.id)
       setCategoryRecords((current) => current.filter((item) => item.id !== category.id))
       setSuccessMessage(`${category.name} was deleted.`)
+    } catch (error) {
+      console.error('Failed to delete category:', error)
+      setSuccessMessage(error instanceof Error ? error.message : 'Unable to delete category. Please try again.')
+    } finally {
+      categoryDeleteRef.current = null
     }
   }
 
   function openSupplierForm(supplier = null) {
+    if (!supplier && supplierRoute) clearSupplierRoute()
     setEditingSupplier(supplier)
     setSupplierForm(supplier ? {
       name: supplier.name,
@@ -381,14 +484,16 @@ function App() {
   }
 
   function closeSupplierForm() {
+    clearSupplierRoute()
     setShowSupplierForm(false)
     setEditingSupplier(null)
     setSupplierForm(emptySupplierForm)
     setSupplierErrors({})
   }
 
-  function submitSupplier(event) {
+  async function submitSupplier(event) {
     event.preventDefault()
+    if (supplierSubmitRef.current) return
     const name = supplierForm.name.trim()
     const nextErrors = {}
     const duplicate = suppliers.some((supplier) =>
@@ -405,7 +510,6 @@ function App() {
     setSupplierErrors(nextErrors)
     if (Object.keys(nextErrors).length > 0) return
 
-    const now = new Date().toISOString()
     const supplierData = {
       name,
       contactPerson: supplierForm.contactPerson.trim(),
@@ -415,37 +519,38 @@ function App() {
       categories: supplierForm.categories,
       notes: supplierForm.notes.trim(),
     }
-    if (editingSupplier) {
-      setSuppliers((current) => current.map((supplier) =>
-        supplier.id === editingSupplier.id ? { ...supplier, ...supplierData, updatedAt: now } : supplier
-      ))
-      if (normalizeText(editingSupplier.name) !== normalizeText(name)) {
-        setProducts((current) => current.map((product) =>
-          normalizeText(product.supplier) === normalizeText(editingSupplier.name)
-            ? { ...product, supplier: name, updatedAt: now }
-            : product
-        ))
-      }
-      setSuccessMessage(`${name} was updated successfully.`)
-    } else {
-      setSuppliers((current) => [...current, { id: Date.now(), ...supplierData, createdAt: now, updatedAt: now }])
-      setSuccessMessage(`${name} was added successfully.`)
+    supplierSubmitRef.current = true
+    try {
+      const savedSupplier = editingSupplier
+        ? await updateSupplier(editingSupplier.id, supplierData)
+        : await createSupplier(supplierData)
+      setSuppliers((current) => editingSupplier
+        ? current.map((supplier) => supplier.id === editingSupplier.id ? savedSupplier : supplier)
+        : [...current, savedSupplier])
+      setSuccessMessage(`${name} was ${editingSupplier ? 'updated' : 'added'} successfully.`)
+      closeSupplierForm()
+    } catch (error) {
+      console.error('Failed to save supplier:', error)
+      setSupplierErrors({ name: error instanceof Error ? error.message : 'Unable to save supplier.' })
+    } finally {
+      supplierSubmitRef.current = false
     }
-    closeSupplierForm()
   }
 
-  function deleteSupplier(supplier) {
-    const assignedProducts = products.filter((product) =>
-      normalizeText(product.supplier) === normalizeText(supplier.name)
-    )
-    if (assignedProducts.length > 0) {
-      setSuccessMessage(`"${supplier.name}" cannot be deleted because it is assigned to ${assignedProducts.length} product${assignedProducts.length === 1 ? '' : 's'}. Reassign those products first.`)
-      return
-    }
-    if (window.confirm(`Delete "${supplier.name}"? This cannot be undone.`)) {
+  async function deleteSupplier(supplier) {
+    if (!window.confirm(`Delete "${supplier.name}"? This cannot be undone.`) || supplierDeleteRef.current === supplier.id) return
+    supplierDeleteRef.current = supplier.id
+    try {
+      await deleteSupplierFromApi(supplier.id)
       setSuppliers((current) => current.filter((item) => item.id !== supplier.id))
+      clearSupplierRoute()
       setSelectedSupplier(null)
       setSuccessMessage(`${supplier.name} was deleted.`)
+    } catch (error) {
+      console.error('Failed to delete supplier:', error)
+      setSuccessMessage(error instanceof Error ? error.message : 'Unable to delete supplier.')
+    } finally {
+      supplierDeleteRef.current = null
     }
   }
 
@@ -487,7 +592,7 @@ function App() {
     setPurchaseOrderErrors({})
   }
 
-  function submitPurchaseOrder(event) {
+  async function submitPurchaseOrder(event) {
     event.preventDefault()
     if (purchaseOrderSubmitRef.current) return
     const nextErrors = {}
@@ -524,34 +629,30 @@ function App() {
     if (Object.keys(nextErrors).length > 0) return
     purchaseOrderSubmitRef.current = true
 
-    const now = new Date().toISOString()
-    if (editingPurchaseOrder) {
-      setPurchaseOrders((current) => current.map((order) => order.id === editingPurchaseOrder.id
-        ? { ...order, supplierId: supplier.id, supplierName: supplier.name, expectedDelivery: purchaseOrderForm.expectedDelivery, notes: purchaseOrderForm.notes.trim(), lines: lineData, updatedAt: now }
-        : order))
-      setSuccessMessage(`${editingPurchaseOrder.orderNumber} was updated successfully.`)
-    } else {
-      setPurchaseOrders((current) => [...current, {
-        id: Date.now(),
-        orderNumber: getNextOrderNumber(current),
+    try {
+      const request = {
         supplierId: supplier.id,
-        supplierName: supplier.name,
-        orderDate: now,
         expectedDelivery: purchaseOrderForm.expectedDelivery,
-        status: 'Draft',
         notes: purchaseOrderForm.notes.trim(),
         lines: lineData,
-        receivingHistory: [],
-        createdAt: now,
-        updatedAt: now,
-      }])
-      setSuccessMessage('Purchase order was created as a draft.')
+      }
+      const savedOrder = editingPurchaseOrder
+        ? await updatePurchaseOrder(editingPurchaseOrder.id, request)
+        : await createPurchaseOrder(request)
+      setPurchaseOrders((current) => editingPurchaseOrder
+        ? current.map((order) => order.id === editingPurchaseOrder.id ? savedOrder : order)
+        : [...current, savedOrder])
+      setSuccessMessage(editingPurchaseOrder ? `${savedOrder.orderNumber} was updated successfully.` : 'Purchase order was created as a draft.')
+      closePurchaseOrderForm()
+    } catch (error) {
+      console.error('Failed to save purchase order:', error)
+      setPurchaseOrderErrors({ form: error instanceof Error ? error.message : 'Unable to save purchase order.' })
+    } finally {
+      purchaseOrderSubmitRef.current = false
     }
-    closePurchaseOrderForm()
-    purchaseOrderSubmitRef.current = false
   }
 
-  function updatePurchaseOrderStatus(order, nextStatus) {
+  async function updatePurchaseOrderStatus(order, nextStatus) {
     if (nextStatus === 'Ordered') {
       if (!window.confirm(`Place ${order.orderNumber}? It will no longer be a draft.`)) return
     }
@@ -562,11 +663,15 @@ function App() {
       }
       if (!window.confirm(`Cancel ${order.orderNumber}? This cannot be undone.`)) return
     }
-    setPurchaseOrders((current) => current.map((item) =>
-      item.id === order.id ? { ...item, status: nextStatus, updatedAt: new Date().toISOString() } : item
-    ))
-    setSelectedPurchaseOrder((current) => current?.id === order.id ? { ...current, status: nextStatus } : current)
-    setSuccessMessage(`${order.orderNumber} is now ${nextStatus}.`)
+    try {
+      const savedOrder = await updatePurchaseOrderStatusFromApi(order.id, nextStatus)
+      setPurchaseOrders((current) => current.map((item) => item.id === order.id ? savedOrder : item))
+      setSelectedPurchaseOrder((current) => current?.id === order.id ? savedOrder : current)
+      setSuccessMessage(`${order.orderNumber} is now ${savedOrder.status}.`)
+    } catch (error) {
+      console.error('Failed to update purchase order status:', error)
+      setSuccessMessage(error instanceof Error ? error.message : 'Unable to update purchase order status.')
+    }
   }
 
   function openReceiveForm(order) {
@@ -579,7 +684,7 @@ function App() {
     })
   }
 
-  function submitReceipt(event) {
+  async function submitReceipt(event) {
     event.preventDefault()
     if (!receiveForm || receiveSubmitting || receiveSubmissionRef.current === receiveForm.order.id) return
     const nextErrors = {}
@@ -605,55 +710,27 @@ function App() {
 
     receiveSubmissionRef.current = receiveForm.order.id
     setReceiveSubmitting(true)
-    const now = new Date().toISOString()
     const validReceipts = receiptLines.filter((entry) => entry.quantity > 0)
-    const updatedProducts = products.map((product) => {
-      const receipt = validReceipts.find((entry) => entry.orderLine.productId === product.id)
-      return receipt ? { ...product, quantity: product.quantity + receipt.quantity, updatedAt: now } : product
-    })
-    const newMovements = validReceipts.map(({ orderLine, quantity }) => {
-      const product = products.find((item) => item.id === orderLine.productId)
-      return {
-        id: Date.now() + orderLine.productId,
-        productId: product.id,
-        productName: product.name,
-        sku: product.sku,
-        type: 'Stock in',
+    try {
+      const savedOrder = await receivePurchaseOrder(order.id, validReceipts.map(({ orderLine, quantity }) => ({
+        itemId: order.lines.find((line) => line.productId === orderLine.productId)?.id || orderLine.id,
         quantity,
-        previousQuantity: product.quantity,
-        resultingQuantity: product.quantity + quantity,
-        date: now,
-        reference: order.orderNumber,
-        department: product.department,
-        remarks: `Received against ${order.orderNumber}.`,
-      }
-    })
-    const receivedTotal = validReceipts.reduce((total, entry) => total + entry.quantity, 0)
-    const updatedOrder = {
-      ...order,
-      lines: order.lines.map((line) => {
-        const receipt = validReceipts.find((entry) => entry.orderLine.productId === line.productId)
-        return receipt ? { ...line, receivedQuantity: line.receivedQuantity + receipt.quantity, lineTotal: line.orderedQuantity * line.unitCost } : line
-      }),
-      updatedAt: now,
-      receivingHistory: [...order.receivingHistory, {
-        id: Date.now(),
-        date: now,
-        quantities: validReceipts.map((entry) => ({ productId: entry.orderLine.productId, quantity: entry.quantity })),
-        totalQuantity: receivedTotal,
-      }],
+      })), `${order.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+      const [updatedProducts, updatedMovements] = await Promise.all([getProducts(), getStockMovements()])
+      setProducts(updatedProducts)
+      setStockMovements(updatedMovements)
+      setPurchaseOrders((current) => current.map((item) => item.id === order.id ? savedOrder : item))
+      setReceiveForm(null)
+      setReceiveErrors({})
+      setSelectedPurchaseOrder(savedOrder)
+      setSuccessMessage(`${order.orderNumber} receipt recorded and stock updated.`)
+    } catch (error) {
+      console.error('Failed to receive purchase order:', error)
+      setReceiveErrors({ form: error instanceof Error ? error.message : 'Unable to receive purchase order.' })
+    } finally {
+      receiveSubmissionRef.current = null
+      setReceiveSubmitting(false)
     }
-    updatedOrder.status = updatedOrder.lines.every((line) => line.receivedQuantity >= line.orderedQuantity)
-      ? 'Received' : 'Partially Received'
-    setProducts(updatedProducts)
-    setStockMovements((current) => [...newMovements, ...current])
-    setPurchaseOrders((current) => current.map((item) => item.id === order.id ? updatedOrder : item))
-    setReceiveForm(null)
-    setReceiveErrors({})
-    setSelectedPurchaseOrder(updatedOrder)
-    setSuccessMessage(`${order.orderNumber} receipt recorded and stock updated.`)
-    receiveSubmissionRef.current = null
-    setReceiveSubmitting(false)
   }
 
   function validateForm() {
@@ -688,12 +765,11 @@ function App() {
     return Object.keys(nextErrors).length === 0
   }
 
-  function handleSubmit(event) {
+  async function handleSubmit(event) {
     event.preventDefault()
+    if (productSubmitRef.current) return
     setSuccessMessage('')
     if (!validateForm()) return
-
-    const now = new Date().toISOString()
     const productData = {
       name: form.name.trim(), sku: form.sku.trim(), category: form.category,
       description: form.description.trim(), quantity: Number(form.quantity),
@@ -702,35 +778,46 @@ function App() {
       department: form.department, imageUrl: form.imageUrl.trim(),
     }
 
-    if (editingProduct) {
-      setProducts((current) => current.map((product) =>
-        product.id === editingProduct.id
-          ? { ...product, ...productData, updatedAt: now }
-          : product
-      ))
-      setSuccessMessage(`${productData.name} was updated successfully.`)
-    } else {
-      setProducts((current) => [...current, {
-        id: Date.now(), ...productData, createdAt: now, updatedAt: now,
-      }])
-      setSuccessMessage(`${productData.name} was added successfully.`)
+    productSubmitRef.current = true
+    try {
+      const savedProduct = editingProduct
+        ? await updateProduct(editingProduct.id, productData)
+        : await createProduct(productData)
+      setProducts((current) => editingProduct
+        ? current.map((product) => product.id === editingProduct.id ? savedProduct : product)
+        : [...current, savedProduct])
+      await refreshProducts()
+      setSuccessMessage(`${productData.name} was ${editingProduct ? 'updated' : 'added'} successfully.`)
+      setForm(emptyForm)
+      setErrors({})
+      setShowForm(false)
+      setEditingProduct(null)
+    } catch (error) {
+      console.error('Failed to save product:', error)
+      setErrors({ form: error instanceof Error ? error.message : 'Unable to save product.' })
+    } finally {
+      productSubmitRef.current = false
     }
-    setForm(emptyForm)
-    setErrors({})
-    setShowForm(false)
-    setEditingProduct(null)
   }
 
-  function deleteProduct(product) {
-    if (window.confirm(`Delete "${product.name}"? This cannot be undone.`)) {
+  async function deleteProduct(product) {
+    if (!window.confirm(`Delete "${product.name}"? This cannot be undone.`) || productDeleteRef.current === product.id) return
+    productDeleteRef.current = product.id
+    try {
+      await deleteProductFromApi(product.id)
       setProducts((current) => current.filter((item) => item.id !== product.id))
+      await refreshProducts()
       setSelectedProduct(null)
       setSuccessMessage(`${product.name} was deleted.`)
+    } catch (error) {
+      console.error('Failed to delete product:', error)
+      setSuccessMessage(error instanceof Error ? error.message : 'Unable to delete product.')
+    } finally {
+      productDeleteRef.current = null
     }
-
   }
 
-  function handleMovementSubmit(event) {
+  async function handleMovementSubmit(event) {
     event.preventDefault()
     const errorsForMovement = {}
     const quantity = Number(movementForm.quantity)
@@ -740,39 +827,26 @@ function App() {
     if (movementForm.quantity === '' || !Number.isInteger(quantity) || quantity <= 0) {
       errorsForMovement.quantity = 'Enter a positive whole number.'
     }
-    if (product && movementForm.type === 'Stock out' && quantity > product.quantity) {
-      errorsForMovement.quantity = `Only ${product.quantity} unit${product.quantity === 1 ? '' : 's'} available.`
-    }
-
     setMovementErrors(errorsForMovement)
     if (Object.keys(errorsForMovement).length > 0) return
-
-    const resultingQuantity = movementForm.type === 'Stock in'
-      ? product.quantity + quantity
-      : product.quantity - quantity
-    const now = new Date().toISOString()
-    const movement = {
-      id: Date.now(),
-      productId: product.id,
-      productName: product.name,
-      sku: product.sku,
-      type: movementForm.type,
-      quantity,
-      previousQuantity: product.quantity,
-      resultingQuantity,
-      date: now,
-      reference: movementForm.reference.trim() || 'Not specified',
-      department: movementForm.department,
-      remarks: movementForm.remarks.trim(),
+    try {
+      const result = await recordStockMovement({
+        productId: product.id,
+        type: movementForm.type,
+        quantity,
+        idempotencyKey: `${product.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      })
+      const [updatedProducts, updatedMovements] = await Promise.all([getProducts(), getStockMovements()])
+      setProducts(updatedProducts)
+      setStockMovements(updatedMovements)
+      setMovementForm(emptyMovementForm)
+      setMovementErrors({})
+      setSuccessMessage(`${movementForm.type} recorded for ${product.name}.`)
+      return result
+    } catch (error) {
+      console.error('Failed to record stock movement:', error)
+      setMovementErrors({ form: error instanceof Error ? error.message : 'Unable to record stock movement.' })
     }
-
-    setProducts((current) => current.map((item) =>
-      item.id === product.id ? { ...item, quantity: resultingQuantity, updatedAt: now } : item
-    ))
-    setStockMovements((current) => [movement, ...current])
-    setMovementForm(emptyMovementForm)
-    setMovementErrors({})
-    setSuccessMessage(`${movementForm.type} recorded for ${product.name}.`)
   }
 
   function handleSortChange(event) {
@@ -814,10 +888,13 @@ function App() {
         <header className="topbar">
           <button className="menu-button" aria-label="Open navigation" onClick={() => setIsSidebarOpen(true)}>☰</button>
           <div className="page-heading"><p className="eyebrow">WORKSPACE / {activeItem.label.toUpperCase()}</p><h1>{isDashboard ? 'Inventory Dashboard' : activeItem.label}</h1><p className="subtitle">{isDashboard ? 'Monitor your products and stock levels.' : isProducts ? 'Manage and monitor your current stock.' : activePage === 'stock' ? 'Record stock in, stock out, and review inventory history.' : activePage === 'categories' ? 'Organize products with reusable inventory categories.' : activePage === 'suppliers' ? 'Manage supplier contacts and product assignments.' : isPurchaseOrders ? 'Create orders, track delivery, and receive inventory.' : isReports ? 'Review current inventory, stock activity, and purchasing data.' : isNotifications ? 'Review current stock alerts and create replenishment drafts.' : 'This workspace is planned for a future phase.'}</p></div>
-          {isDashboard && <div className="topbar-actions"><button className="secondary-button" onClick={() => handleNavigation('notifications')}>Alerts: {productAlertCount} products · {outstandingOrderCount} orders</button><button className="primary-button" onClick={openAddForm}>+ Add Product</button></div>}
+          <div className="topbar-actions">{isDashboard && <><button className="secondary-button" onClick={() => handleNavigation('notifications')}>Alerts: {productAlertCount} products · {outstandingOrderCount} orders</button><button className="primary-button" onClick={openAddForm}>+ Add Product</button></>}</div>
         </header>
 
         {successMessage && <div className="success-message" role="status">{successMessage}</div>}
+        {categoryLoadError && <div className="error-message" role="alert">{categoryLoadError}</div>}
+        {productLoadError && <div className="error-message" role="alert">Products could not be loaded: {productLoadError}</div>}
+        {productsLoading && <div className="loading-message" role="status">Loading products from the backend…</div>}
 
         {(isProducts || (isDashboard && showForm)) && <ProductForm categories={categoryOptions} suppliers={suppliers} form={form} setForm={setForm} errors={errors} editingProduct={editingProduct} onSubmit={handleSubmit} onCancel={closeForm} />}
 
@@ -833,7 +910,7 @@ function App() {
 
         {activePage === 'stock' && <StockManagement products={products} movementForm={movementForm} setMovementForm={setMovementForm} errors={movementErrors} onSubmit={handleMovementSubmit} movements={stockMovements} />}
         {activePage === 'categories' && <CategoryManagement categories={visibleCategories} search={categorySearch} setSearch={setCategorySearch} form={categoryForm} setForm={setCategoryForm} errors={categoryErrors} editingCategory={editingCategory} onSubmit={submitCategory} onEdit={editCategory} onDelete={deleteCategory} onCancel={resetCategoryForm} />}
-        {activePage === 'suppliers' && <SupplierManagement suppliers={visibleSuppliers} products={products} categories={categoryOptions} search={supplierSearch} setSearch={setSupplierSearch} form={supplierForm} setForm={setSupplierForm} errors={supplierErrors} editingSupplier={editingSupplier} selectedSupplier={selectedSupplier} onSelect={setSelectedSupplier} showForm={showSupplierForm} onAdd={() => openSupplierForm()} onEdit={openSupplierForm} onDelete={deleteSupplier} onSubmit={submitSupplier} onCancel={closeSupplierForm} />}
+        {activePage === 'suppliers' && <SupplierManagement suppliers={visibleSuppliers} products={products} categories={categoryOptions} search={supplierSearch} setSearch={setSupplierSearch} form={supplierForm} setForm={setSupplierForm} errors={supplierErrors} editingSupplier={editingSupplier} selectedSupplier={selectedSupplier} onSelect={(supplier) => supplier ? navigateSupplierRoute(supplier.id, 'view') : clearSupplierRoute()} showForm={showSupplierForm} onAdd={() => openSupplierForm()} onEdit={(supplier) => navigateSupplierRoute(supplier.id, 'edit')} onDelete={deleteSupplier} onSubmit={submitSupplier} onCancel={closeSupplierForm} />}
         {isPurchaseOrders && <PurchaseOrderManagement orders={visiblePurchaseOrders} allOrders={purchaseOrders} products={products} suppliers={suppliers} search={purchaseOrderSearch} setSearch={setPurchaseOrderSearch} statusFilter={purchaseOrderStatusFilter} setStatusFilter={setPurchaseOrderStatusFilter} form={purchaseOrderForm} setForm={setPurchaseOrderForm} errors={purchaseOrderErrors} editingOrder={editingPurchaseOrder} selectedOrder={selectedPurchaseOrder} showForm={showPurchaseOrderForm} receiveForm={receiveForm} setReceiveForm={setReceiveForm} receiveErrors={receiveErrors} receiveSubmitting={receiveSubmitting} onAdd={() => openPurchaseOrderForm()} onEdit={openPurchaseOrderForm} onSelect={setSelectedPurchaseOrder} onSubmit={submitPurchaseOrder} onCancel={closePurchaseOrderForm} onPlace={(order) => updatePurchaseOrderStatus(order, 'Ordered')} onCancelOrder={(order) => updatePurchaseOrderStatus(order, 'Cancelled')} onReceive={openReceiveForm} onReceiveSubmit={submitReceipt} onReceiveCancel={() => { setReceiveForm(null); setReceiveErrors({}) }} />}
         {isReports && <Reports products={products} categories={categoryRecords} suppliers={suppliers} movements={stockMovements} orders={purchaseOrders} filters={reportFilters} setFilters={setReportFilters} />}
         {isNotifications && <NotificationsPage products={notificationProducts} orders={awaitingPurchaseOrders} suppliers={suppliers} reorderQuantities={reorderQuantities} setReorderQuantities={setReorderQuantities} reorderSuppliers={reorderSuppliers} setReorderSuppliers={setReorderSuppliers} onProduct={(product) => { handleNavigation('products'); setSelectedProduct(product) }} onOrder={(order) => { handleNavigation('purchase-orders'); setSelectedPurchaseOrder(order) }} onCreateOrder={openPurchaseOrderFromRecommendation} />}
@@ -844,6 +921,8 @@ function App() {
     </div>
   )
 }
+
+export default InventoryApp
 
 function Dashboard({ products, totalUnits, inventoryValue, lowStockProducts, outOfStockProducts, stockMovements, productAlertCount, outstandingOrderCount, onProducts, onStock, onNotifications, onView }) {
   return (
@@ -903,6 +982,7 @@ function StockManagement({ products, movementForm, setMovementForm, errors, onSu
     <section className="stock-page">
       <section className="form-card">
         <div className="section-heading"><div><h2>Record stock movement</h2><p>Use Stock In for received items and Stock Out for issued items.</p></div></div>
+        {errors.form && <p className="field-error" role="alert">{errors.form}</p>}
         <form onSubmit={onSubmit} noValidate>
           <SelectField id="movement-type" label="Movement type" value={movementForm.type} onChange={(value) => updateField('type', value)} options={['Stock in', 'Stock out']} />
           <label htmlFor="movement-product">Product *<select id="movement-product" value={movementForm.productId} onChange={(event) => updateField('productId', event.target.value)} aria-invalid={Boolean(errors.productId)}><option value="">Select a product</option>{products.map((product) => <option value={product.id} key={product.id}>{product.name} ({product.sku}) · {product.quantity} available</option>)}</select>{errors.productId && <span className="field-error">{errors.productId}</span>}</label>
@@ -938,7 +1018,7 @@ function CategoryManagement({ categories, search, setSearch, form, setForm, erro
 }
 
 function MovementHistory({ movements }) {
-  return <section className="table-card movement-history"><div className="table-heading"><div><h2>Stock movement history</h2><p>Only successfully recorded movements appear here. Data is temporary and resets on refresh.</p></div></div><div className="table-scroll"><table><thead><tr><th>DATE / TIME</th><th>PRODUCT</th><th>SKU</th><th>TYPE</th><th>QUANTITY</th><th>PREVIOUS</th><th>RESULTING</th><th>REFERENCE / DEPARTMENT</th><th>REMARKS</th></tr></thead><tbody>{movements.map((movement) => <tr key={movement.id}><td>{formatMovementDate(movement.date)}</td><td className="product-name">{movement.productName}</td><td>{movement.sku}</td><td><span className={`movement-badge ${movement.type === 'Stock in' ? 'movement-in' : 'movement-out'}`}>{movement.type}</span></td><td>{movement.quantity}</td><td>{movement.previousQuantity}</td><td>{movement.resultingQuantity}</td><td>{movement.reference} · {movement.department}</td><td>{movement.remarks || '—'}</td></tr>)}{movements.length === 0 && <tr><td colSpan="9"><EmptyState message="No stock movements recorded yet." /></td></tr>}</tbody></table></div></section>
+  return <section className="table-card movement-history"><div className="table-heading"><div><h2>Stock movement history</h2><p>Persisted movements from the inventory database. Historical balances are shown only when provided by the database.</p></div></div><div className="table-scroll"><table><thead><tr><th>DATE / TIME</th><th>PRODUCT</th><th>SKU</th><th>TYPE</th><th>QUANTITY</th><th>PREVIOUS</th><th>RESULTING</th><th>REFERENCE / DEPARTMENT</th><th>REMARKS</th></tr></thead><tbody>{movements.map((movement) => <tr key={movement.id}><td>{formatMovementDate(movement.date)}</td><td className="product-name">{movement.productName}</td><td>{movement.sku}</td><td><span className={`movement-badge ${movement.type === 'Stock in' ? 'movement-in' : 'movement-out'}`}>{movement.type}</span></td><td>{movement.quantity}</td><td>{movement.previousQuantity ?? '—'}</td><td>{movement.resultingQuantity ?? '—'}</td><td>{movement.reference} · {movement.department}</td><td>{movement.remarks || '—'}</td></tr>)}{movements.length === 0 && <tr><td colSpan="9"><EmptyState message="No stock movements recorded yet." /></td></tr>}</tbody></table></div></section>
 }
 
 function formatMovementDate(date) {
@@ -1149,7 +1229,7 @@ function SupplierForm({ categories, form, setForm, errors, editingSupplier, onSu
 }
 
 function SupplierDetails({ supplier, productCount, onClose, onEdit, onDelete }) {
-  return <section className="details-card"><div className="details-header"><div><p className="eyebrow">SUPPLIER DETAILS</p><h2>{supplier.name}</h2></div><button className="close-button" aria-label="Close supplier details" onClick={onClose}>×</button></div><div className="details-grid supplier-details-grid"><DetailItem label="Contact person" value={supplier.contactPerson || 'Not specified'} /><DetailItem label="Phone" value={supplier.phone || 'Not specified'} /><DetailItem label="Email" value={supplier.email || 'Not specified'} /><DetailItem label="Categories" value={supplier.categories.length ? supplier.categories.join(', ') : 'Not specified'} /><DetailItem label="Created" value={formatDate(supplier.createdAt)} /><DetailItem label="Updated" value={formatDate(supplier.updatedAt)} /><DetailItem label="Assigned products" value={productCount} /><DetailItem label="Address" value={supplier.address || 'Not specified'} /></div><p className="details-description">{supplier.notes || 'No notes provided.'}</p><div className="details-actions"><button className="secondary-button" onClick={onDelete}>Delete supplier</button><button className="primary-button" onClick={onEdit}>Edit supplier</button></div></section>
+  return <section className="details-card"><div className="details-header"><div><p className="eyebrow">SUPPLIER DETAILS</p><h2>{supplier.name}</h2></div><button className="close-button" aria-label="Close supplier details" onClick={onClose}>×</button></div><div className="details-grid supplier-details-grid"><DetailItem label="Contact person" value={supplier.contactPerson || 'Not specified'} /><DetailItem label="Phone" value={supplier.phone || 'Not specified'} /><DetailItem label="Email" value={supplier.email || 'Not specified'} /><DetailItem label="Categories" value={supplier.categories.length ? supplier.categories.join(', ') : 'Not specified'} /><DetailItem label="Created" value={formatDate(supplier.createdAt)} /><DetailItem label="Updated" value={formatDate(supplier.updatedAt)} /><DetailItem label="Assigned products" value={productCount} /><DetailItem label="Address" value={supplier.address || 'Not specified'} /><DetailItem label="Notes" value={supplier.notes || 'No notes provided.'} /></div><div className="details-actions"><button className="secondary-button" onClick={onDelete}>Delete supplier</button><button className="primary-button" onClick={onEdit}>Edit supplier</button></div></section>
 }
 
 function ProductFilters({ categories, search, setSearch, categoryFilter, setCategoryFilter, statusFilter, setStatusFilter, sortBy, sortDirection, onSort, onClear }) {
@@ -1203,7 +1283,5 @@ function ImagePreview({ src, alt, large = false }) {
 }
 
 function ProductTable({ products, filteredProducts, onView, onEdit, onDelete, compact = false }) {
-  return <section className={`table-card ${compact ? 'dashboard-products' : ''}`}>{!compact && <div className="table-heading"><div><h2>Product Inventory</h2><p>Showing {filteredProducts.length} of {products.length} products.</p></div></div>}<div className="table-scroll"><table><thead><tr><th>PRODUCT</th><th>SKU</th><th>CATEGORY</th><th>SUPPLIER</th><th>QUANTITY</th><th>UNIT PRICE</th><th>STATUS</th><th>ACTION</th></tr></thead><tbody>{filteredProducts.map((product) => <tr key={product.id}><td><button className="product-cell" onClick={() => onView(product)}><ImagePreview src={product.imageUrl} alt="" /><span className="product-name">{product.name}</span></button></td><td>{product.sku}</td><td>{product.category}</td><td className="long-cell">{product.supplier || 'Not specified'}</td><td>{product.quantity}</td><td>৳{product.price.toLocaleString('en-BD')}</td><td><span className={`status ${getStockStatus(product)}`}>{getStockLabel(product)}</span></td><td><div className="table-actions"><button className="table-action" onClick={() => onView(product)}>View</button>{!compact && <><button className="table-action" onClick={() => onEdit(product)}>Edit</button><button className="delete-button" onClick={() => onDelete(product)}>Delete</button></>}</div></td></tr>)}{filteredProducts.length === 0 && <tr><td colSpan="8"><EmptyState message="No products match your search or filters." /></td></tr>}</tbody></table></div>{!compact && <div className="table-footer">Use View to inspect details or Edit to update a product.</div>}</section>
+  return <section className={`table-card ${compact ? 'dashboard-products' : ''}`}>{!compact && <div className="table-heading"><div><h2>Product Inventory</h2><p>Showing {filteredProducts.length} of {products.length} products.</p></div></div>}<div className="table-scroll"><table><thead><tr><th>PRODUCT</th><th>IMAGE</th><th>SKU</th><th>CATEGORY</th><th>SUPPLIER</th><th>QUANTITY</th><th>UNIT PRICE</th><th>STATUS</th><th>ACTION</th></tr></thead><tbody>{filteredProducts.map((product) => <tr key={product.id}><td><button className="product-cell" onClick={() => onView(product)}><span className="product-name">{product.name}</span></button></td><td><ImagePreview src={product.imageUrl} alt={`${product.name} product`} /></td><td>{product.sku}</td><td>{product.category}</td><td className="long-cell">{product.supplier || 'Not specified'}</td><td>{product.quantity}</td><td>৳{product.price.toLocaleString('en-BD')}</td><td><span className={`status ${getStockStatus(product)}`}>{getStockLabel(product)}</span></td><td><div className="table-actions"><button className="table-action" onClick={() => onView(product)}>View</button>{!compact && <><button className="table-action" onClick={() => onEdit(product)}>Edit</button><button className="delete-button" onClick={() => onDelete(product)}>Delete</button></>}</div></td></tr>)}{filteredProducts.length === 0 && <tr><td colSpan="9"><EmptyState message="No products match your search or filters." /></td></tr>}</tbody></table></div>{!compact && <div className="table-footer">Use View to inspect product details or Edit to update a product.</div>}</section>
 }
-
-export default App
