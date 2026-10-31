@@ -21,19 +21,28 @@ function requireAuth(req, res, next) {
 function requireRole(...allowedRoles) {
   return async (req, res, next) => {
     if (!req.user) return res.status(401).json({ message: "Authentication is required." });
-    const { data: profile, error } = await supabase
-      .from("user_profiles")
-      .select("role, is_active")
-      .eq("id", req.user.id)
-      .maybeSingle();
-    if (error) {
-      console.error("Role lookup failed:", error.message);
+    try {
+      const { data: profile, error } = await supabase
+        .from("user_profiles")
+        .select("role, is_active")
+        .eq("id", req.user.id)
+        .maybeSingle();
+      if (error) {
+        console.error("Role lookup failed:", error.message);
+        return res.status(503).json({ message: "Authorization is temporarily unavailable." });
+      }
+      if (!profile || profile.is_active !== true) {
+        return res.status(403).json({ message: "Your account is not authorized to use Inventra." });
+      }
+      if (!allowedRoles.includes(profile.role)) {
+        return res.status(403).json({ message: "You do not have permission to perform this action." });
+      }
+      req.userRole = profile.role;
+      return next();
+    } catch (error) {
+      console.error("Unexpected role lookup failure:", error?.message || "Unknown error");
       return res.status(503).json({ message: "Authorization is temporarily unavailable." });
     }
-    if (!profile || profile.is_active === false) return res.status(403).json({ message: "Your account is not authorized to use Inventra." });
-    if (!allowedRoles.includes(profile.role)) return res.status(403).json({ message: "You do not have permission to perform this action." });
-    req.userRole = profile.role;
-    return next();
   };
 }
 

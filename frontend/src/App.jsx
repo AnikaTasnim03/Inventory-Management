@@ -4,7 +4,7 @@ import InventraLogo from './InventraLogo.jsx'
 import { createCategory, deleteCategory as deleteCategoryFromApi, getCategories, updateCategory } from './categoryService'
 import { createProduct, deleteProduct as deleteProductFromApi, getProducts, updateProduct } from './productService'
 import { createSupplier, deleteSupplier as deleteSupplierFromApi, getSuppliers, updateSupplier } from './supplierService'
-import { createPurchaseOrder, getPurchaseOrders, receivePurchaseOrder, updatePurchaseOrder, updatePurchaseOrderStatus as updatePurchaseOrderStatusFromApi } from './purchaseOrderService'
+import { createPurchaseOrder, createPurchaseOrderReceiptIdempotencyKey, getPurchaseOrders, receivePurchaseOrder, updatePurchaseOrder, updatePurchaseOrderStatus as updatePurchaseOrderStatusFromApi } from './purchaseOrderService'
 import { createStockMovementIdempotencyKey, getStockMovements, recordStockMovement } from './stockMovementService'
 import {
   buildSourceNotifications,
@@ -30,10 +30,12 @@ import {
   isWithinReportDateRange,
 } from './reportAnalytics'
 import { defaultAppSettings, readAppSettings, writeAppSettings } from './settingsService'
+import InventoryAuditPage from './InventoryAuditPage.jsx'
 const navigationItems = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'products', label: 'Products' },
   { id: 'stock', label: 'Stock Management' },
+  { id: 'audit', label: 'Inventory Audit' },
   { id: 'categories', label: 'Categories' },
   { id: 'suppliers', label: 'Suppliers' },
   { id: 'purchase-orders', label: 'Purchase Orders' },
@@ -48,6 +50,7 @@ function NavigationIcon({ name }) {
     dashboard: <><rect x="3.5" y="3.5" width="7" height="7" rx="1.5" /><rect x="13.5" y="3.5" width="7" height="7" rx="1.5" /><rect x="3.5" y="13.5" width="7" height="7" rx="1.5" /><rect x="13.5" y="13.5" width="7" height="7" rx="1.5" /></>,
     products: <><path d="m12 3 8.5 4.5v9L12 21l-8.5-4.5v-9L12 3Z" /><path d="m3.8 7.7 8.2 4.5 8.2-4.5M12 12.2V21" /></>,
     stock: <><path d="M7 7h12l-3-3M17 17H5l3 3" /><path d="M19 7a7 7 0 0 1 1 9M5 17a7 7 0 0 1-1-9" /></>,
+    audit: <><path d="M8 4h8l3 3v13H5V4h3Z" /><path d="M9 11h6M9 15h6M8 4v4h8V4" /></>,
     categories: <><path d="M4 5.5h7v7H4zM13 5.5h7v7h-7zM4 14.5h7v5H4zM13 14.5h7v5h-7z" /></>,
     suppliers: <><circle cx="9" cy="8" r="3.2" /><path d="M3.5 20v-1.6a5.5 5.5 0 0 1 11 0V20h-11ZM16 5.2a3.1 3.1 0 0 1 0 5.9M17.5 14a4.7 4.7 0 0 1 3 4.4V20h-3" /></>,
     'purchase-orders': <><path d="M6 3.5h8l4 4V20H6z" /><path d="M14 3.5v4h4M9 12h6M9 15.5h6M9 9h1" /></>,
@@ -293,6 +296,7 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
   const [receiveErrors, setReceiveErrors] = useState({})
   const [receiveSubmitting, setReceiveSubmitting] = useState(false)
   const receiveSubmissionRef = useRef(null)
+  const pendingReceiptRef = useRef(null)
   const purchaseOrderSubmitRef = useRef(false)
   const [reportFilters, setReportFilters] = useState(emptyReportFilters)
   const [reorderQuantities, setReorderQuantities] = useState({})
@@ -995,7 +999,6 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
   }
 
   function openReceiveForm(order) {
-    receiveSubmissionRef.current = null
     setSelectedPurchaseOrder(null)
     setReceiveErrors({})
     setReceiveForm({
@@ -1006,7 +1009,7 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
 
   async function submitReceipt(event) {
     event.preventDefault()
-    if (!receiveForm || receiveSubmitting || receiveSubmissionRef.current === receiveForm.order.id) return
+    if (!receiveForm || receiveSubmitting || receiveSubmissionRef.current !== null) return
     const nextErrors = {}
     const order = purchaseOrders.find((item) => item.id === receiveForm.order.id)
     if (!order || order.status === 'Cancelled' || order.status === 'Received') {
@@ -1028,22 +1031,39 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
     setReceiveErrors(nextErrors)
     if (Object.keys(nextErrors).length > 0) return
 
-    receiveSubmissionRef.current = receiveForm.order.id
-    setReceiveSubmitting(true)
     const validReceipts = receiptLines.filter((entry) => entry.quantity > 0)
-    try {
-      const savedOrder = await receivePurchaseOrder(order.id, validReceipts.map(({ orderLine, quantity }) => ({
+      .map(({ orderLine, quantity }) => ({
         itemId: order.lines.find((line) => line.productId === orderLine.productId)?.id || orderLine.id,
         quantity,
-      })), `${order.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`)
-      const [updatedProducts, updatedMovements] = await Promise.all([getProducts(), getStockMovements()])
-      setProducts(updatedProducts)
-      setStockMovements(updatedMovements)
+      }))
+    const requestFingerprint = JSON.stringify({ orderId: order.id, receipts: validReceipts })
+    receiveSubmissionRef.current = order.id
+    setReceiveSubmitting(true)
+    try {
+      if (pendingReceiptRef.current?.fingerprint !== requestFingerprint) {
+        pendingReceiptRef.current = {
+          fingerprint: requestFingerprint,
+          idempotencyKey: createPurchaseOrderReceiptIdempotencyKey(),
+        }
+      }
+      const { idempotencyKey } = pendingReceiptRef.current
+      const savedOrder = await receivePurchaseOrder(order.id, validReceipts, idempotencyKey)
+      pendingReceiptRef.current = null
       setPurchaseOrders((current) => current.map((item) => item.id === order.id ? savedOrder : item))
       setReceiveForm(null)
       setReceiveErrors({})
       setSelectedPurchaseOrder(savedOrder)
       setSuccessMessage(`${order.orderNumber} receipt recorded and stock updated.`)
+      const [productsResult, movementsResult] = await Promise.allSettled([getProducts(), getStockMovements()])
+      if (productsResult.status === 'fulfilled') setProducts(productsResult.value)
+      if (movementsResult.status === 'fulfilled') setStockMovements(movementsResult.value)
+      if (productsResult.status === 'rejected' || movementsResult.status === 'rejected') {
+        console.error('Purchase-order receipt succeeded, but inventory refresh failed:', {
+          productsError: productsResult.status === 'rejected' ? productsResult.reason : null,
+          movementsError: movementsResult.status === 'rejected' ? movementsResult.reason : null,
+        })
+        setSuccessMessage(`${order.orderNumber} receipt recorded. Refresh inventory to update the displayed stock and movement history.`)
+      }
     } catch (error) {
       console.error('Failed to receive purchase order:', error)
       setReceiveErrors({ form: error instanceof Error ? error.message : 'Unable to receive purchase order.' })
@@ -1183,10 +1203,18 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
     const product = products.find((item) => item.id === Number(movementForm.productId))
 
     if (!product) errorsForMovement.productId = 'Select a product.'
-    if (movementForm.quantity === '' || !Number.isSafeInteger(quantity) || quantity <= 0 || quantity > 2147483647) {
-      errorsForMovement.quantity = 'Enter a positive whole number.'
+    if (movementForm.quantity === '' || !Number.isSafeInteger(quantity) || Math.abs(quantity) > 2147483647
+      || (movementForm.type === 'Adjustment' ? quantity === 0 : quantity <= 0)) {
+      errorsForMovement.quantity = movementForm.type === 'Adjustment'
+        ? 'Enter a non-zero whole-number change.'
+        : 'Enter a positive whole number.'
     } else if (movementForm.type === 'Stock out' && product && quantity > product.quantity) {
       errorsForMovement.quantity = `Only ${product.quantity} unit${product.quantity === 1 ? '' : 's'} available.`
+    } else if (movementForm.type === 'Adjustment' && product && product.quantity + quantity < 0) {
+      errorsForMovement.quantity = `Adjustment cannot reduce stock below zero; ${product.quantity} unit${product.quantity === 1 ? '' : 's'} available.`
+    }
+    if (movementForm.type === 'Adjustment' && !movementForm.remarks.trim()) {
+      errorsForMovement.remarks = 'Enter a reason for this adjustment.'
     }
     setMovementErrors(errorsForMovement)
     if (Object.keys(errorsForMovement).length > 0) return
@@ -1290,7 +1318,7 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
       <main className="main">
         <header className="topbar">
           <button className="menu-button" aria-label="Open navigation" onClick={() => setIsSidebarOpen(true)}>☰</button>
-          <div className="page-heading"><p className="eyebrow">WORKSPACE / {activeItem.label.toUpperCase()}</p><h1>{isDashboard ? 'Inventory Dashboard' : activeItem.label}</h1><p className="subtitle">{isDashboard ? 'Monitor your products and stock levels.' : isProducts ? 'Manage and monitor your current stock.' : activePage === 'stock' ? 'Record stock in, stock out, and review inventory history.' : activePage === 'categories' ? 'Organize products with reusable inventory categories.' : activePage === 'suppliers' ? 'Manage supplier contacts and product assignments.' : activePage === 'settings' ? 'Manage your account profile and workspace preferences.' : isPurchaseOrders ? 'Create orders, track delivery, and receive inventory.' : isReports ? 'Review current inventory, stock activity, and purchasing data.' : isNotifications ? 'Review current stock alerts and create replenishment drafts.' : 'This workspace is planned for a future phase.'}</p></div>
+          <div className="page-heading"><p className="eyebrow">WORKSPACE / {activeItem.label.toUpperCase()}</p><h1>{isDashboard ? 'Inventory Dashboard' : activeItem.label}</h1><p className="subtitle">{isDashboard ? 'Monitor your products and stock levels.' : isProducts ? 'Manage and monitor your current stock.' : activePage === 'stock' ? 'Record stock in, stock out, adjustments, and review inventory history.' : activePage === 'audit' ? 'Review traceable stock changes, balance history, and recorded actors.' : activePage === 'categories' ? 'Organize products with reusable inventory categories.' : activePage === 'suppliers' ? 'Manage supplier contacts and product assignments.' : activePage === 'settings' ? 'Manage your account profile and workspace preferences.' : isPurchaseOrders ? 'Create orders, track delivery, and receive inventory.' : isReports ? 'Review current inventory, stock activity, and purchasing data.' : isNotifications ? 'Review current stock alerts and create replenishment drafts.' : 'This workspace is planned for a future phase.'}</p></div>
           <div className="topbar-actions">{isDashboard && <><button className="secondary-button" onClick={() => handleNavigation('notifications')}>Alerts: {productAlertCount} products · {outstandingOrderCount} orders</button><button className="primary-button" onClick={openAddForm}>+ Add Product</button></>}{isProducts && !productRoute && <button className="primary-button" onClick={openAddForm}>+ Add Product</button>}<button className="secondary-button signout-button" onClick={onSignOut}>Sign out</button></div>
         </header>
 
@@ -1360,6 +1388,7 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
         )}
 
         {activePage === 'stock' && <StockManagement products={products} movementForm={movementForm} setMovementForm={setMovementForm} errors={movementErrors} submitting={movementSubmitting} onSubmit={handleMovementSubmit} movements={stockMovements} />}
+        {activePage === 'audit' && <InventoryAuditPage products={products} />}
         {activePage === 'categories' && <CategoryManagement categories={visibleCategories} search={categorySearch} setSearch={setCategorySearch} form={categoryForm} setForm={setCategoryForm} errors={categoryErrors} editingCategory={editingCategory} formRef={categoryFormRef} onSubmit={submitCategory} onEdit={editCategory} onDelete={deleteCategory} onCancel={resetCategoryForm} />}
         {activePage === 'suppliers' && <SupplierManagement suppliers={visibleSuppliers} products={products} categories={categoryOptions} search={supplierSearch} setSearch={setSupplierSearch} errors={supplierErrors} loading={suppliersLoading} loadError={supplierLoadError} form={supplierForm} setForm={setSupplierForm} editingSupplier={editingSupplier} selectedSupplier={selectedSupplier} formRef={supplierFormRef} detailsRef={supplierDetailsRef} onSelect={(supplier) => supplier ? navigateSupplierRoute(supplier.id, 'view') : clearSupplierRoute()} showForm={showSupplierForm} onAdd={() => openSupplierForm()} onEdit={(supplier) => navigateSupplierRoute(supplier.id, 'edit')} onDelete={deleteSupplier} onSubmit={submitSupplier} onCancel={closeSupplierForm} />}
         {activePage === 'settings' && <SettingsPage user={user} settings={settings} storageError={settingsStorageError} onSaveSettings={saveSettings} onUpdateProfile={onUpdateProfile} />}
@@ -1400,7 +1429,7 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
           onCreateOrder={openPurchaseOrderFromRecommendation}
         />}
 
-        {!isDashboard && !isProducts && activePage !== 'stock' && activePage !== 'categories' && activePage !== 'suppliers' && activePage !== 'settings' && !isPurchaseOrders && !isReports && !isNotifications && <section className="planned-card"><span className="planned-icon">◌</span><h2>{activeItem.label} is planned</h2><p>This navigation item is visible for the future Inventra roadmap. It will become functional in a later implementation phase.</p></section>}
+        {!isDashboard && !isProducts && activePage !== 'stock' && activePage !== 'audit' && activePage !== 'categories' && activePage !== 'suppliers' && activePage !== 'settings' && !isPurchaseOrders && !isReports && !isNotifications && <section className="planned-card"><span className="planned-icon">◌</span><h2>{activeItem.label} is planned</h2><p>This navigation item is visible for the future Inventra roadmap. It will become functional in a later implementation phase.</p></section>}
         <footer>Built with React · Demo data only</footer>
       </main>
     </div>
@@ -1950,15 +1979,15 @@ function StockManagement({ products, movementForm, setMovementForm, errors, subm
   return (
     <section className="stock-page">
       <section className="form-card">
-        <div className="section-heading"><div><h2>Record stock movement</h2><p>Use Stock In for received items and Stock Out for issued items.</p></div></div>
+        <div className="section-heading"><div><h2>Record stock movement</h2><p>Record stock in, stock out, or a signed quantity adjustment.</p></div></div>
         {errors.form && <p className="field-error" role="alert">{errors.form}</p>}
         <form onSubmit={onSubmit} noValidate>
-          <SelectField id="movement-type" label="Movement type" value={movementForm.type} onChange={(value) => updateField('type', value)} options={['Stock in', 'Stock out']} />
+          <SelectField id="movement-type" label="Movement type" value={movementForm.type} onChange={(value) => updateField('type', value)} options={['Stock in', 'Stock out', 'Adjustment']} />
           <label htmlFor="movement-product">Product *<select id="movement-product" value={movementForm.productId} onChange={(event) => updateField('productId', event.target.value)} aria-invalid={Boolean(errors.productId)}><option value="">{visibleProducts.length === 0 && normalizedProductSearch ? 'No matching products' : 'Select a product'}</option>{visibleProducts.map((product) => <option value={product.id} key={product.id}>{product.name} ({product.sku}) · {product.quantity} available</option>)}</select>{errors.productId && <span className="field-error">{errors.productId}</span>}</label>
-          <FormField id="movement-quantity" label="Quantity *" type="number" min="1" step="1" value={movementForm.quantity} onChange={(value) => updateField('quantity', value)} error={errors.quantity} placeholder="Enter whole units" />
+          <FormField id="movement-quantity" label={movementForm.type === 'Adjustment' ? 'Quantity change (+/-) *' : 'Quantity *'} type="number" min={movementForm.type === 'Adjustment' ? '-2147483647' : '1'} max="2147483647" step="1" value={movementForm.quantity} onChange={(value) => updateField('quantity', value)} error={errors.quantity} placeholder={movementForm.type === 'Adjustment' ? 'Positive to add, negative to remove' : 'Enter whole units'} />
           <FormField id="movement-reference" label="Reference / request number" value={movementForm.reference} onChange={(value) => updateField('reference', value)} placeholder="Optional reference" />
           <SelectField id="movement-department" label="Department" value={movementForm.department} onChange={(value) => updateField('department', value)} options={departments} />
-          <div className="form-wide"><label htmlFor="movement-remarks">Remarks<textarea id="movement-remarks" rows="3" value={movementForm.remarks} onChange={(event) => updateField('remarks', event.target.value)} placeholder="Optional notes about this movement" /></label></div>
+          <div className="form-wide"><label htmlFor="movement-remarks">Remarks<textarea id="movement-remarks" rows="3" value={movementForm.remarks} onChange={(event) => updateField('remarks', event.target.value)} placeholder={movementForm.type === 'Adjustment' ? 'Reason required for adjustment' : 'Optional notes about this movement'} />{errors.remarks && <span className="field-error">{errors.remarks}</span>}</label></div>
           <div className="form-actions"><button type="submit" className="primary-button" disabled={submitting}>{submitting ? 'Recording...' : `Record ${movementForm.type}`}</button></div>
         </form>
       </section>
@@ -1997,7 +2026,7 @@ function CategoryManagement({ categories, search, setSearch, form, setForm, erro
 }
 
 function MovementHistory({ movements }) {
-  return <section className="table-card movement-history"><div className="table-heading"><div><h2>Stock movement history</h2><p>Persisted movements from the inventory database. Historical balances are shown only when provided by the database.</p></div></div><div className="table-scroll"><table><thead><tr><th>DATE / TIME</th><th>PRODUCT</th><th>SKU</th><th>TYPE</th><th>QUANTITY</th><th>PREVIOUS</th><th>RESULTING</th><th>REFERENCE / DEPARTMENT</th><th>REMARKS</th></tr></thead><tbody>{movements.map((movement) => <tr key={movement.id}><td>{formatMovementDate(movement.date)}</td><td className="product-name">{movement.productName}</td><td>{movement.sku}</td><td><span className={`movement-badge ${movement.type === 'Stock in' ? 'movement-in' : 'movement-out'}`}>{movement.type}</span></td><td>{movement.quantity}</td><td>{movement.previousQuantity ?? '—'}</td><td>{movement.resultingQuantity ?? '—'}</td><td>{movement.reference} · {movement.department}</td><td>{movement.remarks || '—'}</td></tr>)}{movements.length === 0 && <tr><td colSpan="9"><EmptyState message="No stock movements recorded yet." /></td></tr>}</tbody></table></div></section>
+  return <section className="table-card movement-history"><div className="table-heading"><div><h2>Stock movement history</h2><p>Persisted movements from the inventory database. Historical balances are shown only when provided by the database.</p></div></div><div className="table-scroll"><table><thead><tr><th>DATE / TIME</th><th>PRODUCT</th><th>SKU</th><th>TYPE</th><th>QUANTITY</th><th>PREVIOUS</th><th>RESULTING</th><th>REFERENCE / DEPARTMENT</th><th>REMARKS</th></tr></thead><tbody>{movements.map((movement) => <tr key={movement.id}><td>{formatMovementDate(movement.date)}</td><td className="product-name">{movement.productName}</td><td>{movement.sku}</td><td><span className={`movement-badge ${['Stock in', 'Receipt'].includes(movement.type) ? 'movement-in' : movement.type === 'Stock out' ? 'movement-out' : ''}`}>{movement.type}</span></td><td>{movement.quantity}</td><td>{movement.previousQuantity ?? '—'}</td><td>{movement.resultingQuantity ?? '—'}</td><td>{movement.reference} · {movement.department}</td><td>{movement.remarks || '—'}</td></tr>)}{movements.length === 0 && <tr><td colSpan="9"><EmptyState message="No stock movements recorded yet." /></td></tr>}</tbody></table></div></section>
 }
 
 function formatMovementDate(date) {
@@ -2416,7 +2445,7 @@ function PurchaseOrderManagement({ orders, allOrders, products, suppliers, searc
       {selectedOrder && <PurchaseOrderDetails order={selectedOrder} detailsRef={detailsRef} onClose={() => onSelect(null)} onEdit={() => onEdit(selectedOrder)} onPlace={() => onPlace(selectedOrder)} onCancelOrder={() => onCancelOrder(selectedOrder)} onReceive={() => onReceive(selectedOrder)} />}
       <section className="table-card purchase-order-list-card">
         <div className="table-heading"><div><h2>Purchase orders</h2><p>Temporary demonstration records reset on refresh.</p></div><div className="po-heading-actions"><input className="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search order or supplier..." aria-label="Search purchase orders" /><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} aria-label="Filter purchase orders by status"><option value="all">All statuses</option>{['Draft', 'Ordered', 'Partially Received', 'Received', 'Cancelled'].map((status) => <option key={status}>{status}</option>)}</select><button className="primary-button" onClick={onAdd}>+ New Order</button></div></div>
-        <div className="table-scroll"><table><thead><tr><th>ORDER NUMBER</th><th>SUPPLIER</th><th>ORDER DATE</th><th>EXPECTED</th><th>TOTAL</th><th>STATUS</th><th>ACTION</th></tr></thead><tbody>{orders.map((order) => <tr key={order.id}><td className="product-name">{order.orderNumber}</td><td className="long-cell">{order.supplierName}</td><td>{formatDate(order.orderDate)}</td><td>{order.expectedDelivery ? formatDate(order.expectedDelivery) : 'Not specified'}</td><td>{formatCurrency(getPurchaseOrderTotal(order))}</td><td><span className={`po-status po-${normalizeText(order.status).replaceAll(' ', '-')}`}>{order.status}</span></td><td><div className="table-actions"><button className="table-action" onClick={() => onSelect(order)}>View</button>{order.status === 'Draft' && <><button className="table-action" onClick={() => onEdit(order)}>Edit</button><button className="table-action" onClick={() => onPlace(order)}>Place</button><button className="delete-button" onClick={() => onCancelOrder(order)}>Cancel</button></>}{(order.status === 'Ordered' || order.status === 'Partially Received') && <button className="table-action" onClick={() => onReceive(order)}>Receive</button>}</div></td></tr>)}{orders.length === 0 && <tr><td colSpan="7"><EmptyState message="No purchase orders match your search or status filter." /></td></tr>}</tbody></table></div>
+        <div className="table-scroll"><table><thead><tr><th>ORDER NUMBER</th><th>SUPPLIER</th><th>ORDER DATE</th><th>EXPECTED</th><th>TOTAL</th><th>STATUS</th><th>ACTION</th></tr></thead><tbody>{orders.map((order) => <tr key={order.id}><td className="product-name">{order.orderNumber}</td><td className="long-cell">{order.supplierName}</td><td>{formatDate(order.orderDate)}</td><td>{order.expectedDelivery ? formatDate(order.expectedDelivery) : 'Not specified'}</td><td>{formatCurrency(getPurchaseOrderTotal(order))}</td><td><span className={`po-status po-${normalizeText(order.status).replaceAll(' ', '-')}`}>{order.status}</span></td><td><div className="table-actions"><button className="table-action" onClick={() => onSelect(order)}>View</button>{order.status === 'Draft' && <><button className="table-action" onClick={() => onEdit(order)}>Edit</button><button className="table-action" onClick={() => onPlace(order)}>Place</button><button className="delete-button" onClick={() => onCancelOrder(order)}>Cancel</button></>}{(order.status === 'Ordered' || order.status === 'Partially Received') && <button className="table-action" onClick={() => onSelect(order)}>Receive</button>}</div></td></tr>)}{orders.length === 0 && <tr><td colSpan="7"><EmptyState message="No purchase orders match your search or status filter." /></td></tr>}</tbody></table></div>
       </section>
     </section>
   )

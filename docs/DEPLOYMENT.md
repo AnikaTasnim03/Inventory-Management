@@ -25,11 +25,13 @@ Never place `SUPABASE_SECRET_KEY` in frontend variables or browser code.
 3. Execute `20261029_atomic_stock_operations.sql`.
 4. Execute `20261029_user_profiles_roles.sql`.
 5. Execute `20261031_auth_signup_profiles.sql` to create viewer profiles for new Auth users.
-6. Insert the initial administrator's Auth UUID into `public.user_profiles` with role `admin`.
-7. Grant the two RPC functions only to the backend database role after confirming the role:
-   - `record_stock_movement(bigint, text, integer, text, text, text, text)`
-   - `receive_purchase_order(bigint, jsonb, text)`
-8. Verify RLS is enabled on all migration-created tables and that no `anon` policy or function execution grant exists.
+6. Execute `20261031_inventory_audit_trail.sql` after the receipt and atomic stock-operation migrations. It creates the new audit ledger and disables the old unaudited stock RPC entrypoints. Historical movements are not backfilled with invented actor or balance data.
+7. Insert the initial administrator's Auth UUID into `public.user_profiles` with role `admin`.
+8. Verify execution grants for the new RPC functions are limited to `service_role` (the audit migration applies these grants):
+   - `record_audited_stock_movement(bigint, text, integer, text, text, text, text, uuid)`
+   - `receive_audited_purchase_order(bigint, jsonb, text, uuid)`
+9. Keep the two legacy RPC functions revoked; do not restore their execution grants.
+10. Verify RLS is enabled on all migration-created tables and that no `anon` policy or function execution grant exists.
 
 The current inventory schema is shared: inventory records are not assigned to individual users or workspaces. Authenticated users with an active profile can read the shared workspace. New sign-ups receive the `viewer` role; only `admin` and `staff` profiles can change inventory. Promote users to `staff` or `admin` through a trusted administrator workflow, never from the browser.
 

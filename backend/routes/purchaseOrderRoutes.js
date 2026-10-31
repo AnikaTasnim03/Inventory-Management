@@ -7,7 +7,7 @@ const itemSelect = "id, purchase_order_id, product_id, quantity, unit_cost, rece
 
 function parseId(value) {
   const id = Number(value);
-  return Number.isInteger(id) && id > 0 ? id : null;
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
 function mapStatus(status, lines) {
@@ -240,20 +240,32 @@ router.post("/:id/receive", async (req, res) => {
   if (!Array.isArray(receipts) || receipts.length === 0) return res.status(400).json({ message: "At least one receipt line is required." });
   if (!idempotencyKey) return res.status(400).json({ message: "A receipt request identifier is required." });
   for (const line of receipts) {
-    if (!parseId(line.itemId) || !Number.isInteger(Number(line.quantity)) || Number(line.quantity) <= 0) {
-      return res.status(400).json({ message: "Receipt lines require valid item IDs and positive whole-number quantities." });
+    if (
+      !parseId(line.itemId)
+      || !Number.isSafeInteger(Number(line.quantity))
+      || Number(line.quantity) <= 0
+      || Number(line.quantity) > 2147483647
+    ) {
+      return res.status(400).json({
+        message: "Receipt lines require valid item IDs and positive whole-number quantities.",
+      });
     }
   }
   try {
-    const { data, error } = await supabase.rpc("receive_purchase_order", {
+    const { data, error } = await supabase.rpc("receive_audited_purchase_order", {
       p_purchase_order_id: id,
       p_receipts: receipts.map((line) => ({ item_id: parseId(line.itemId), quantity: Number(line.quantity) })),
       p_idempotency_key: idempotencyKey,
+      p_actor_user_id: req.user.id,
     });
     if (error) {
-      if (error.code === "42883") return res.status(503).json({ message: "Receiving requires the atomic database migration to be executed first." });
-      if (["22023", "22003"].includes(error.code)) return res.status(400).json({ message: error.message });
-      if (error.code === "P0002") return res.status(404).json({ message: error.message });
+      if (["42883", "PGRST202"].includes(error.code)) return res.status(503).json({ message: "Audited receiving is unavailable. Apply the inventory audit migration and refresh the Supabase API schema cache." });
+      if (error.code === "22023") return res.status(400).json({ message: "Receipt request is invalid or exceeds the outstanding quantity." });
+      if (error.code === "22003") return res.status(409).json({ message: "Receipt would exceed the supported stock quantity range." });
+      if (error.code === "P0002") {
+        console.error("Purchase-order receipt references a missing record:", error.message);
+        return res.status(404).json({ message: "Purchase order, line, or product was not found." });
+      }
       throw error;
     }
     if (data?.duplicate) return res.status(200).json(await getOrder(id));

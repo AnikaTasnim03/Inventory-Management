@@ -1,12 +1,8 @@
 const express = require("express");
 const supabase = require("../config/supabase");
+const { parseAuditFilters, validateStockMovementBody } = require("../lib/stockMovementValidation");
 
 const router = express.Router();
-
-function parseId(value) {
-  const id = Number(value);
-  return Number.isSafeInteger(id) && id > 0 ? id : null;
-}
 
 function parseNote(note) {
   const legacy = {
@@ -15,12 +11,13 @@ function parseNote(note) {
     remarks: "",
     previousQuantity: null,
     resultingQuantity: null,
+    movementType: null,
   };
   if (typeof note !== "string" || !note.trim()) return legacy;
 
   try {
     const parsed = JSON.parse(note);
-    if (parsed?.format !== "inventra.stock-movement" || parsed?.version !== 1) {
+    if (parsed?.format !== "inventra.stock-movement" || ![1, 2].includes(parsed?.version)) {
       return { ...legacy, remarks: note };
     }
     return {
@@ -29,6 +26,9 @@ function parseNote(note) {
       remarks: typeof parsed.remarks === "string" ? parsed.remarks : "",
       previousQuantity: Number.isInteger(parsed.previousQuantity) ? parsed.previousQuantity : null,
       resultingQuantity: Number.isInteger(parsed.resultingQuantity) ? parsed.resultingQuantity : null,
+      movementType: ["IN", "OUT", "ADJUSTMENT", "RECEIPT"].includes(parsed.movementType)
+        ? parsed.movementType
+        : null,
     };
   } catch {
     return { ...legacy, remarks: note };
@@ -42,7 +42,9 @@ function mapMovement(row) {
     productId: row.product_id,
     productName: row.products?.name || "",
     sku: row.products?.sku || "",
-    type: row.movement_type === "IN" ? "Stock in" : row.movement_type === "OUT" ? "Stock out" : "Adjustment",
+    type: note.movementType === "ADJUSTMENT"
+      ? "Adjustment"
+      : row.movement_type === "IN" ? "Stock in" : row.movement_type === "OUT" ? "Stock out" : "Adjustment",
     quantity: row.quantity,
     date: row.created_at,
     ...note,
@@ -64,22 +66,94 @@ function mapOperationResult(result) {
   return {
     duplicate: result.duplicate,
     movementId: result.movement_id,
+    auditId: Number.isInteger(result.audit_id) ? result.audit_id : null,
     productId: result.product_id,
     reference: result.reference,
     department: result.department,
     remarks: result.remarks,
     previousQuantity: result.previous_quantity,
     resultingQuantity: result.resulting_quantity,
+    quantityChanged: Number.isInteger(result.quantity_changed)
+      ? result.quantity_changed
+      : result.resulting_quantity - result.previous_quantity,
   };
 }
 
-function optionalText(value, field, maxLength) {
-  if (value === undefined || value === null) return { value: null };
-  if (typeof value !== "string") return { error: `${field} must be text.` };
-  const normalized = value.trim();
-  if (normalized.length > maxLength) return { error: `${field} must be ${maxLength} characters or fewer.` };
-  return { value: normalized || null };
+function mapAuditRecord(row) {
+  return {
+    id: row.id,
+    productId: row.product_id,
+    productName: row.products?.name || "",
+    sku: row.products?.sku || "",
+    userId: row.actor_user_id || null,
+    movementType: row.movement_type,
+    quantityChanged: row.quantity_changed,
+    previousQuantity: row.previous_quantity,
+    newQuantity: row.new_quantity,
+    reason: row.reason,
+    reference: row.reference || "",
+    department: row.department || "",
+    purchaseOrderId: row.purchase_order_id,
+    receiptId: row.receipt_id,
+    stockMovementId: row.stock_movement_id,
+    date: row.created_at,
+  };
 }
+
+router.get("/audit", async (req, res) => {
+  const parsed = parseAuditFilters(req.query);
+  if (parsed.error) return res.status(400).json({ message: parsed.error });
+  const filters = parsed.value;
+  try {
+    let request = supabase
+      .from("inventory_audit_trail")
+      .select(
+        "id, product_id, actor_user_id, movement_type, quantity_changed, previous_quantity, new_quantity, reason, reference, department, purchase_order_id, receipt_id, stock_movement_id, created_at, products(name, sku)",
+        { count: "exact" }
+      )
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .range(filters.offset, filters.offset + filters.limit - 1);
+    if (filters.productId) request = request.eq("product_id", filters.productId);
+    if (filters.movementType) request = request.eq("movement_type", filters.movementType);
+    if (filters.userId) request = request.eq("actor_user_id", filters.userId);
+    if (filters.search) {
+      request = request.or(
+        `reference.ilike.%${filters.search}%,products.name.ilike.%${filters.search}%,products.sku.ilike.%${filters.search}%`
+      );
+    }
+    if (filters.from) request = request.gte("created_at", `${filters.from}T00:00:00.000Z`);
+    if (filters.to) {
+      const exclusiveEnd = new Date(`${filters.to}T00:00:00.000Z`);
+      exclusiveEnd.setUTCDate(exclusiveEnd.getUTCDate() + 1);
+      request = request.lt("created_at", exclusiveEnd.toISOString());
+    }
+
+    const { data, error, count } = await request;
+    if (error) {
+      if (["42P01", "PGRST205"].includes(error.code)) {
+        return res.status(503).json({
+          code: "AUDIT_MIGRATION_REQUIRED",
+          message: "Inventory audit history is unavailable. Apply the inventory audit migration and refresh the database schema cache.",
+        });
+      }
+      throw error;
+    }
+    const total = count || 0;
+    return res.json({
+      items: (data || []).map(mapAuditRecord),
+      pagination: {
+        limit: filters.limit,
+        offset: filters.offset,
+        total,
+        hasMore: filters.offset + filters.limit < total,
+      },
+    });
+  } catch (error) {
+    console.error("Failed to retrieve inventory audit records:", error.message);
+    return res.status(500).json({ message: "Failed to retrieve inventory audit records." });
+  }
+});
 
 router.get("/", async (req, res) => {
   try {
@@ -96,40 +170,29 @@ router.get("/", async (req, res) => {
 });
 
 router.post("/", async (req, res) => {
-  const productId = parseId(req.body?.productId);
-  const quantity = Number(req.body?.quantity);
-  const movementType = req.body?.type === "Stock in" ? "IN" : req.body?.type === "Stock out" ? "OUT" : req.body?.type;
-  if (!productId) return res.status(400).json({ message: "Product ID must be a positive integer." });
-  if (!Number.isSafeInteger(quantity) || quantity <= 0 || quantity > 2147483647) return res.status(400).json({ message: "Movement quantity must be a positive whole number within the supported range." });
-  if (!["IN", "OUT"].includes(movementType)) return res.status(400).json({ message: "Movement type must be IN or OUT." });
-  const idempotencyKey = typeof req.body?.idempotencyKey === "string" ? req.body.idempotencyKey.trim() : "";
-  if (!idempotencyKey) return res.status(400).json({ message: "An idempotency key is required." });
-  if (idempotencyKey.length > 200) return res.status(400).json({ message: "Idempotency key must be 200 characters or fewer." });
-
-  const reference = optionalText(req.body?.reference, "Reference", 200);
-  const department = optionalText(req.body?.department, "Department", 100);
-  const remarks = optionalText(req.body?.remarks, "Remarks", 2000);
-  const invalidField = [reference, department, remarks].find((field) => field.error);
-  if (invalidField) return res.status(400).json({ message: invalidField.error });
+  const parsed = validateStockMovementBody(req.body || {});
+  if (parsed.error) return res.status(400).json({ message: parsed.error });
+  const { productId, movementType, quantity, idempotencyKey, reference, department, remarks } = parsed.value;
 
   try {
     const { data, error } = await supabase.schema("public").rpc("record_stock_movement", {
       p_product_id: productId,
       p_movement_type: movementType,
       p_quantity: quantity,
-      p_reference: reference.value,
-      p_department: department.value,
-      p_remarks: remarks.value,
+      p_reference: reference,
+      p_department: department,
+      p_remarks: remarks,
       p_idempotency_key: idempotencyKey,
+      p_actor_user_id: req.user.id,
     });
     if (error) {
-      if (error.code === "42883" || error.code === "PGRST202") {
+      if (["42883", "PGRST202"].includes(error.code)) {
         console.error("Stock movement RPC is unavailable:", error.message);
-        return res.status(503).json({ message: "Stock movement database function is unavailable. Apply the stock migrations in order and refresh the Supabase API schema cache." });
+        return res.status(503).json({ message: "Stock movement is unavailable. Apply the required stock-operation and audit migrations, then refresh the Supabase API schema cache." });
       }
       if (error.code === "22003") {
-        const message = movementType === "OUT"
-          ? "Stock-out quantity exceeds available stock."
+        const message = movementType === "OUT" || (movementType === "ADJUSTMENT" && quantity < 0)
+          ? "Stock change would reduce inventory below zero."
           : "Resulting stock exceeds the supported quantity range.";
         return res.status(409).json({ message });
       }

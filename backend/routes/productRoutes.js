@@ -119,6 +119,9 @@ router.post("/", async (req, res) => {
   try {
     const errors = validateProduct(req.body || {});
     if (Object.keys(errors).length) return res.status(400).json({ message: "Invalid product.", errors });
+    if (Number(req.body.quantity) !== 0) {
+      return res.status(409).json({ message: "Create the product with zero stock, then record its opening balance as an audited stock movement." });
+    }
     const references = await findReferenceIds(req.body);
     const payload = {
       name: req.body.name.trim(),
@@ -148,6 +151,16 @@ router.put("/:id", async (req, res) => {
     if (!id) return res.status(400).json({ message: "Product ID must be a positive integer." });
     const errors = validateProduct(req.body || {});
     if (Object.keys(errors).length) return res.status(400).json({ message: "Invalid product.", errors });
+    const { data: currentProduct, error: currentProductError } = await supabase
+      .from("products")
+      .select("quantity")
+      .eq("id", id)
+      .maybeSingle();
+    if (currentProductError) throw currentProductError;
+    if (!currentProduct) return res.status(404).json({ message: "Product not found." });
+    if (Number(req.body.quantity) !== Number(currentProduct.quantity)) {
+      return res.status(409).json({ message: "Product quantity cannot be edited directly. Record an audited stock movement or adjustment instead." });
+    }
     const references = await findReferenceIds(req.body);
     const updatePayload = {
       name: req.body.name.trim(),
@@ -160,18 +173,18 @@ router.put("/:id", async (req, res) => {
       ...references,
       updated_at: new Date().toISOString(),
     };
-    let updateQuery = supabase.from("products").update(updatePayload).eq("id", id).select(`${productColumns}, categories(name), suppliers(name)`).maybeSingle();
+    let updateQuery = supabase.from("products").update(updatePayload).eq("id", id).eq("quantity", currentProduct.quantity).select(`${productColumns}, categories(name), suppliers(name)`).maybeSingle();
     let { data, error } = await updateQuery;
     if (isMissingImageColumn(error)) {
       const updatePayloadWithoutImage = { ...updatePayload };
       delete updatePayloadWithoutImage.image_url;
-      ({ data, error } = await supabase.from("products").update(updatePayloadWithoutImage).eq("id", id).select(`${productColumnsWithoutImage}, categories(name), suppliers(name)`).maybeSingle());
+      ({ data, error } = await supabase.from("products").update(updatePayloadWithoutImage).eq("id", id).eq("quantity", currentProduct.quantity).select(`${productColumnsWithoutImage}, categories(name), suppliers(name)`).maybeSingle());
     }
     if (error) {
       if (error.code === "23505") return res.status(409).json({ message: "A product with this SKU already exists." });
       throw error;
     }
-    if (!data) return res.status(404).json({ message: "Product not found." });
+    if (!data) return res.status(409).json({ message: "Product changed while it was being saved. Reload the product and try again." });
     return res.json(mapProduct(data));
   } catch (error) {
     console.error("Failed to update product:", error.message);
