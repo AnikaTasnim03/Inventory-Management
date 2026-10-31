@@ -1,16 +1,19 @@
-# React + Vite
+# Inventra frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+The React + Vite frontend includes a public landing page and a Supabase-authenticated inventory workspace.
 
-Currently, two official plugins are available:
+## Local development
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Create `frontend/.env` with:
 
-## React Compiler
+- `VITE_API_URL`: backend API base URL, including `/api`.
+- `VITE_SUPABASE_URL`: Supabase project URL.
+- `VITE_SUPABASE_ANON_KEY` or `VITE_SUPABASE_PUBLISHABLE_KEY`: public client key only.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Run `npm install`, then `npm run dev`. Use `npm run lint` and `npm run build` to validate changes.
 
-## Expanding the ESLint configuration
+## Authentication and access
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+The frontend restores Supabase sessions, sends the access token with workspace API requests, and provides sign-up, sign-in, sign-out, and password reset flows. Apply the database migrations in [the deployment checklist](../docs/DEPLOYMENT.md) before enabling sign-ups. New accounts are viewers until an administrator grants staff or admin access.
+
+Never put the Supabase service-role/secret key in frontend environment variables.

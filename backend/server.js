@@ -5,6 +5,7 @@ const mongoose = require("mongoose");
 const rateLimit = require("express-rate-limit");
 require("dotenv").config();
 const supabase = require("./config/supabase");
+const { requireAuth, requireRole } = require("./middleware/auth");
 
 const categoryRoutes = require("./routes/categoryRoutes");
 const productRoutes = require("./routes/productRoutes");
@@ -37,6 +38,13 @@ app.use("/api", rateLimit({
   legacyHeaders: false,
   message: { message: "Too many requests. Please try again later." },
 }));
+app.use("/api", requireAuth, requireRole("admin", "staff", "viewer"), (req, res, next) => {
+  const isWriteRequest = ["POST", "PUT", "PATCH", "DELETE"].includes(req.method);
+  if (isWriteRequest && req.userRole === "viewer") {
+    return res.status(403).json({ message: "Your Inventra role is read-only. Ask an administrator for edit access." });
+  }
+  return next();
+});
 
 // Category API routes connected to Supabase
 app.use("/api/categories", categoryRoutes);

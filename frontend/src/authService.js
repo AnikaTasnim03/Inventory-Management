@@ -11,6 +11,35 @@ export async function signIn(email, password) {
   return data.session
 }
 
+export async function signUp(fullName, email, password) {
+  const { data, error } = await requireSupabase().auth.signUp({
+    email,
+    password,
+    options: { data: { full_name: fullName.trim() } },
+  })
+  if (error) throw new Error(error.message || 'Unable to create your account.')
+  return data
+}
+
+export async function updateProfileName(fullName, user) {
+  const { data, error } = await requireSupabase().auth.updateUser({
+    data: {
+      ...(user?.user_metadata || {}),
+      full_name: fullName.trim(),
+    },
+  })
+  if (error) throw new Error(error.message || 'Unable to update your profile.')
+  if (!data.user) throw new Error('Supabase did not return the updated account profile.')
+  return data.user
+}
+
+export async function requestPasswordReset(email) {
+  const { error } = await requireSupabase().auth.resetPasswordForEmail(email, {
+    redirectTo: window.location.origin,
+  })
+  if (error) throw new Error(error.message || 'Unable to send the password reset email.')
+}
+
 export async function signOut() {
   const { error } = await requireSupabase().auth.signOut()
   if (error) throw new Error(error.message || 'Unable to sign out.')

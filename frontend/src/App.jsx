@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import './App.css'
+import InventraLogo from './InventraLogo.jsx'
 import { createCategory, deleteCategory as deleteCategoryFromApi, getCategories, updateCategory } from './categoryService'
 import { createProduct, deleteProduct as deleteProductFromApi, getProducts, updateProduct } from './productService'
 import { createSupplier, deleteSupplier as deleteSupplierFromApi, getSuppliers, updateSupplier } from './supplierService'
@@ -28,17 +29,39 @@ import {
   getValidProductQuantity,
   isWithinReportDateRange,
 } from './reportAnalytics'
+import { defaultAppSettings, readAppSettings, writeAppSettings } from './settingsService'
 const navigationItems = [
-  { id: 'dashboard', label: 'Dashboard', icon: '▦' },
-  { id: 'products', label: 'Products', icon: '□' },
-  { id: 'stock', label: 'Stock Management', icon: '⇄' },
-  { id: 'categories', label: 'Categories', icon: '▧' },
-  { id: 'suppliers', label: 'Suppliers', icon: '♧' },
-  { id: 'purchase-orders', label: 'Purchase Orders', icon: '▣' },
-  { id: 'notifications', label: 'Notifications', icon: '!' },
-  { id: 'reports', label: 'Reports & Analytics', icon: '▤' },
-  { id: 'settings', label: 'Settings', icon: '⚙' },
+  { id: 'dashboard', label: 'Dashboard' },
+  { id: 'products', label: 'Products' },
+  { id: 'stock', label: 'Stock Management' },
+  { id: 'categories', label: 'Categories' },
+  { id: 'suppliers', label: 'Suppliers' },
+  { id: 'purchase-orders', label: 'Purchase Orders' },
+  { id: 'notifications', label: 'Notifications' },
+  { id: 'reports', label: 'Reports & Analytics' },
+  { id: 'settings', label: 'Settings' },
 ]
+
+function NavigationIcon({ name }) {
+  const iconShapes = {
+    home: <><path d="m3.5 10 8.5-7 8.5 7v10.5h-6v-6h-5v6h-6V10Z" /><path d="M2.5 10.5 12 2.8l9.5 7.7" /></>,
+    dashboard: <><rect x="3.5" y="3.5" width="7" height="7" rx="1.5" /><rect x="13.5" y="3.5" width="7" height="7" rx="1.5" /><rect x="3.5" y="13.5" width="7" height="7" rx="1.5" /><rect x="13.5" y="13.5" width="7" height="7" rx="1.5" /></>,
+    products: <><path d="m12 3 8.5 4.5v9L12 21l-8.5-4.5v-9L12 3Z" /><path d="m3.8 7.7 8.2 4.5 8.2-4.5M12 12.2V21" /></>,
+    stock: <><path d="M7 7h12l-3-3M17 17H5l3 3" /><path d="M19 7a7 7 0 0 1 1 9M5 17a7 7 0 0 1-1-9" /></>,
+    categories: <><path d="M4 5.5h7v7H4zM13 5.5h7v7h-7zM4 14.5h7v5H4zM13 14.5h7v5h-7z" /></>,
+    suppliers: <><circle cx="9" cy="8" r="3.2" /><path d="M3.5 20v-1.6a5.5 5.5 0 0 1 11 0V20h-11ZM16 5.2a3.1 3.1 0 0 1 0 5.9M17.5 14a4.7 4.7 0 0 1 3 4.4V20h-3" /></>,
+    'purchase-orders': <><path d="M6 3.5h8l4 4V20H6z" /><path d="M14 3.5v4h4M9 12h6M9 15.5h6M9 9h1" /></>,
+    notifications: <><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM10 21h4" /></>,
+    reports: <><path d="M4 20V11M10 20V5M16 20v-8M22 20H2" /></>,
+    settings: <><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" /><path d="m19.4 15 .1.1 1.2.9-1.4 2.4-1.4-.6a7.8 7.8 0 0 1-1.5.9l-.2 1.5h-2.8l-.2-1.5a7.8 7.8 0 0 1-1.5-.9l-1.4.6-1.4-2.4 1.2-.9a7 7 0 0 1 0-1.8l-1.2-.9 1.4-2.4 1.4.6a7.8 7.8 0 0 1 1.5-.9l.2-1.5h2.8l.2 1.5a7.8 7.8 0 0 1 1.5.9l1.4-.6 1.4 2.4-1.2.9a7 7 0 0 1 0 1.8Z" /></>,
+  }
+
+  return (
+    <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      {iconShapes[name]}
+    </svg>
+  )
+}
 
 const initialCategories = [
   { id: 1, name: 'IT Equipment', description: 'Computers, monitors, and other information technology assets.', createdAt: '2026-10-01' },
@@ -47,14 +70,6 @@ const initialCategories = [
   { id: 4, name: 'Furniture', description: 'Furniture and fixtures for workspaces.', createdAt: '2026-10-01' },
   { id: 5, name: 'Accessories', description: 'Cables, peripherals, and supporting equipment.', createdAt: '2026-10-01' },
   { id: 6, name: 'Other', description: 'Other inventory items not covered by the main categories.', createdAt: '2026-10-01' },
-]
-
-const initialSuppliers = [
-  { id: 1, name: 'Demo Technology Supplier', contactPerson: 'Demo Contact', phone: '+880 1700-000001', email: 'technology@example.com', address: 'Fictional demo address', categories: ['IT Equipment'], notes: 'Fictional supplier for demonstration only.', createdAt: '2026-10-01', updatedAt: '2026-10-01' },
-  { id: 2, name: 'Demo Network Supplier', contactPerson: 'Demo Contact', phone: '+880 1700-000002', email: 'network@example.com', address: 'Fictional demo address', categories: ['Networking'], notes: 'Fictional supplier for demonstration only.', createdAt: '2026-10-02', updatedAt: '2026-10-02' },
-  { id: 3, name: 'Demo Office Supplier', contactPerson: 'Demo Contact', phone: '+880 1700-000003', email: 'office@example.com', address: 'Fictional demo address', categories: ['Office Supplies'], notes: 'Fictional supplier for demonstration only.', createdAt: '2026-10-03', updatedAt: '2026-10-03' },
-  { id: 4, name: 'Demo Furniture Supplier', contactPerson: 'Demo Contact', phone: '+880 1700-000004', email: 'furniture@example.com', address: 'Fictional demo address', categories: ['Furniture'], notes: 'Fictional supplier for demonstration only.', createdAt: '2026-10-04', updatedAt: '2026-10-04' },
-  { id: 5, name: 'Demo Telecom Supplier', contactPerson: 'Demo Contact', phone: '+880 1700-000005', email: 'telecom@example.com', address: 'Fictional demo address', categories: ['Accessories'], notes: 'Fictional supplier for demonstration only.', createdAt: '2026-10-05', updatedAt: '2026-10-05' },
 ]
 
 const conditions = ['New', 'Good', 'Needs attention']
@@ -90,6 +105,14 @@ const emptyReportFilters = {
   dateRange: 'last-30-days', customStart: '', customEnd: '',
   movementProduct: 'all', movementCategory: 'all', movementType: 'all',
   movementReference: '', orderSupplier: 'all', orderStatus: 'all',
+}
+
+function getInitialWorkspacePage() {
+  const requestedPage = new URLSearchParams(window.location.search).get('workspace')
+  if (navigationItems.some((item) => item.id === requestedPage)) return requestedPage
+  if (getSupplierRoute()) return 'suppliers'
+  if (getProductRoute()) return 'products'
+  return 'dashboard'
 }
 
 function getStockStatus(product) {
@@ -190,7 +213,7 @@ function getProductRoute(pathname = window.location.pathname) {
     ? { id: Number(match[1]), mode: match[2] ? 'edit' : 'view' }
     : null
 }
-function InventoryApp() {
+function InventoryApp({ onGoHome, onSignOut, user, onUpdateProfile, authError, workspaceRequest }) {
   const [products, setProducts] = useState([])
   const [productsLoading, setProductsLoading] = useState(true)
   const [productLoadError, setProductLoadError] = useState('')
@@ -203,13 +226,11 @@ function InventoryApp() {
   const dashboardRefreshPromiseRef = useRef(null)
   const [categoryRecords, setCategoryRecords] = useState(initialCategories)
   const [categoryLoadError, setCategoryLoadError] = useState('')
-  const [suppliers, setSuppliers] = useState(initialSuppliers)
+  const [suppliers, setSuppliers] = useState([])
+  const [suppliersLoading, setSuppliersLoading] = useState(true)
+  const [supplierLoadError, setSupplierLoadError] = useState('')
   const [stockMovements, setStockMovements] = useState([])
- const [activePage, setActivePage] = useState(() => {
-  if (getSupplierRoute()) return 'suppliers'
-  if (getProductRoute()) return 'products'
-  return 'dashboard'
-})
+ const [activePage, setActivePage] = useState(getInitialWorkspacePage)
 const [productRoute, setProductRoute] = useState(() => getProductRoute())
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const [search, setSearch] = useState('')
@@ -236,19 +257,36 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
   const [categoryForm, setCategoryForm] = useState({ name: '', description: '' })
   const [editingCategory, setEditingCategory] = useState(null)
   const [categoryErrors, setCategoryErrors] = useState({})
+  const categoryFormRef = useRef(null)
   const [supplierSearch, setSupplierSearch] = useState('')
   const [supplierForm, setSupplierForm] = useState(emptySupplierForm)
   const [editingSupplier, setEditingSupplier] = useState(null)
   const [selectedSupplier, setSelectedSupplier] = useState(null)
+  const supplierFormRef = useRef(null)
+  const supplierDetailsRef = useRef(null)
   const [supplierRoute, setSupplierRoute] = useState(() => getSupplierRoute())
   const [supplierErrors, setSupplierErrors] = useState({})
   const [showSupplierForm, setShowSupplierForm] = useState(false)
+  const [initialSettings] = useState(() => {
+    try {
+      return { value: readAppSettings(user.id), error: '' }
+    } catch (error) {
+      return {
+        value: structuredClone(defaultAppSettings),
+        error: error instanceof Error ? error.message : 'Unable to load saved settings.',
+      }
+    }
+  })
+  const [settings, setSettings] = useState(initialSettings.value)
+  const [settingsStorageError, setSettingsStorageError] = useState(initialSettings.error)
   const [purchaseOrders, setPurchaseOrders] = useState([])
   const [purchaseOrderSearch, setPurchaseOrderSearch] = useState('')
   const [purchaseOrderStatusFilter, setPurchaseOrderStatusFilter] = useState('all')
   const [purchaseOrderForm, setPurchaseOrderForm] = useState(emptyPurchaseOrderForm)
   const [editingPurchaseOrder, setEditingPurchaseOrder] = useState(null)
   const [selectedPurchaseOrder, setSelectedPurchaseOrder] = useState(null)
+  const purchaseOrderFormRef = useRef(null)
+  const purchaseOrderDetailsRef = useRef(null)
   const [purchaseOrderErrors, setPurchaseOrderErrors] = useState({})
   const [showPurchaseOrderForm, setShowPurchaseOrderForm] = useState(false)
   const [receiveForm, setReceiveForm] = useState(null)
@@ -321,6 +359,33 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
     }, 0)
     return () => window.clearTimeout(timer)
   }, [supplierRoute, suppliers])
+
+  useEffect(() => {
+    if (activePage === 'categories' && editingCategory) {
+      categoryFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  }, [activePage, editingCategory])
+
+  useEffect(() => {
+    if (activePage !== 'suppliers') return
+    const target = showSupplierForm
+      ? supplierFormRef.current
+      : selectedSupplier
+        ? supplierDetailsRef.current
+        : null
+    target?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [activePage, selectedSupplier, showSupplierForm])
+
+  useEffect(() => {
+    if (activePage !== 'purchase-orders') return
+    const target = showPurchaseOrderForm
+      ? purchaseOrderFormRef.current
+      : selectedPurchaseOrder
+        ? purchaseOrderDetailsRef.current
+        : null
+    target?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [activePage, selectedPurchaseOrder, showPurchaseOrderForm])
+
   useEffect(() => {
   if (!productRoute) return
 
@@ -365,7 +430,16 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
         if (dashboardRequestVersion === dashboardRefreshVersionRef.current) {
           setDashboardLoading(false)
         }
-        if (suppliersResult.status === 'fulfilled') setSuppliers(suppliersResult.value)
+        if (suppliersResult.status === 'fulfilled') {
+          setSuppliers(suppliersResult.value)
+          setSupplierLoadError('')
+        } else {
+          setSuppliers([])
+          setSupplierLoadError(suppliersResult.reason instanceof Error
+            ? suppliersResult.reason.message
+            : 'Unable to load suppliers from the backend.')
+        }
+        setSuppliersLoading(false)
         if (dashboardRequestVersion === dashboardRefreshVersionRef.current) {
           if (ordersResult.status === 'fulfilled') setPurchaseOrders(ordersResult.value)
           if (movementsResult.status === 'fulfilled') setStockMovements(movementsResult.value)
@@ -522,6 +596,11 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
     setSelectedProduct(null)
   }
 
+  const navigateToRequestedWorkspace = useEffectEvent((pageId) => handleNavigation(pageId))
+  useEffect(() => {
+    if (workspaceRequest?.page) navigateToRequestedWorkspace(workspaceRequest.page)
+  }, [workspaceRequest])
+
   function navigateSupplierRoute(supplierId, mode) {
     const path = mode === 'edit' ? `/suppliers/${supplierId}/edit` : `/suppliers/${supplierId}`
     window.history.pushState({}, '', path)
@@ -555,7 +634,11 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
 
   function openAddForm() {
     setEditingProduct(null)
-    setForm(emptyForm)
+    setForm({
+      ...emptyForm,
+      reorderThreshold: String(settings.inventory.defaultReorderThreshold),
+      department: settings.inventory.defaultDepartment,
+    })
     setErrors({})
     setSuccessMessage('')
     setProductSaveWarning('')
@@ -700,6 +783,12 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
     setSelectedSupplier(null)
   }
 
+  function saveSettings(nextSettings) {
+    writeAppSettings(user.id, nextSettings)
+    setSettings(nextSettings)
+    setSettingsStorageError('')
+  }
+
   function closeSupplierForm() {
     clearSupplierRoute()
     setShowSupplierForm(false)
@@ -786,6 +875,12 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
     setPurchaseOrderErrors({})
     setShowPurchaseOrderForm(true)
     setSelectedPurchaseOrder(null)
+  }
+
+  function openPurchaseOrderDetails(order) {
+    setShowPurchaseOrderForm(false)
+    setEditingPurchaseOrder(null)
+    setSelectedPurchaseOrder(order)
   }
 
   function openPurchaseOrderFromRecommendation(product, quantity, supplierId) {
@@ -1180,20 +1275,26 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
     <div className="app">
       {isSidebarOpen && <button className="sidebar-backdrop" aria-label="Close navigation" onClick={() => setIsSidebarOpen(false)} />}
       <aside className={`sidebar ${isSidebarOpen ? 'sidebar-open' : ''}`}>
-        <div className="brand"><span className="brand-icon">I</span><span>Inventra</span><button className="sidebar-close" aria-label="Close navigation" onClick={() => setIsSidebarOpen(false)}>×</button></div>
-        <p className="nav-label">WORKSPACE</p>
-        <nav aria-label="Main navigation">
-          {navigationItems.map((item) => <button className={`nav-item ${activePage === item.id ? 'active' : ''}`} key={item.id} onClick={() => handleNavigation(item.id)}><span className="nav-icon" aria-hidden="true">{item.icon}</span>{item.label}</button>)}
-        </nav>
+        <div className="brand"><InventraLogo className="brand-mark-app" /><span>Inventra</span><button className="sidebar-close" aria-label="Close navigation" onClick={() => setIsSidebarOpen(false)}>×</button></div>
+        <div className="sidebar-navigation">
+          <nav className="sidebar-home" aria-label="Public navigation">
+            <button className="nav-item home-nav-item" onClick={onGoHome}><NavigationIcon name="home" /><span>Home</span></button>
+          </nav>
+          <p className="nav-label">WORKSPACE</p>
+          <nav className="workspace-navigation" aria-label="Workspace navigation">
+            {navigationItems.map((item) => <button className={`nav-item ${activePage === item.id ? 'active' : ''}`} key={item.id} onClick={() => handleNavigation(item.id)}><NavigationIcon name={item.id} /><span>{item.label}</span></button>)}
+          </nav>
+        </div>
       </aside>
 
       <main className="main">
         <header className="topbar">
           <button className="menu-button" aria-label="Open navigation" onClick={() => setIsSidebarOpen(true)}>☰</button>
-          <div className="page-heading"><p className="eyebrow">WORKSPACE / {activeItem.label.toUpperCase()}</p><h1>{isDashboard ? 'Inventory Dashboard' : activeItem.label}</h1><p className="subtitle">{isDashboard ? 'Monitor your products and stock levels.' : isProducts ? 'Manage and monitor your current stock.' : activePage === 'stock' ? 'Record stock in, stock out, and review inventory history.' : activePage === 'categories' ? 'Organize products with reusable inventory categories.' : activePage === 'suppliers' ? 'Manage supplier contacts and product assignments.' : isPurchaseOrders ? 'Create orders, track delivery, and receive inventory.' : isReports ? 'Review current inventory, stock activity, and purchasing data.' : isNotifications ? 'Review current stock alerts and create replenishment drafts.' : 'This workspace is planned for a future phase.'}</p></div>
-          <div className="topbar-actions">{isDashboard && <><button className="secondary-button" onClick={() => handleNavigation('notifications')}>Alerts: {productAlertCount} products · {outstandingOrderCount} orders</button><button className="primary-button" onClick={openAddForm}>+ Add Product</button></>}{isProducts && !productRoute && <button className="primary-button" onClick={openAddForm}>+ Add Product</button>}</div>
+          <div className="page-heading"><p className="eyebrow">WORKSPACE / {activeItem.label.toUpperCase()}</p><h1>{isDashboard ? 'Inventory Dashboard' : activeItem.label}</h1><p className="subtitle">{isDashboard ? 'Monitor your products and stock levels.' : isProducts ? 'Manage and monitor your current stock.' : activePage === 'stock' ? 'Record stock in, stock out, and review inventory history.' : activePage === 'categories' ? 'Organize products with reusable inventory categories.' : activePage === 'suppliers' ? 'Manage supplier contacts and product assignments.' : activePage === 'settings' ? 'Manage your account profile and workspace preferences.' : isPurchaseOrders ? 'Create orders, track delivery, and receive inventory.' : isReports ? 'Review current inventory, stock activity, and purchasing data.' : isNotifications ? 'Review current stock alerts and create replenishment drafts.' : 'This workspace is planned for a future phase.'}</p></div>
+          <div className="topbar-actions">{isDashboard && <><button className="secondary-button" onClick={() => handleNavigation('notifications')}>Alerts: {productAlertCount} products · {outstandingOrderCount} orders</button><button className="primary-button" onClick={openAddForm}>+ Add Product</button></>}{isProducts && !productRoute && <button className="primary-button" onClick={openAddForm}>+ Add Product</button>}<button className="secondary-button signout-button" onClick={onSignOut}>Sign out</button></div>
         </header>
 
+        {authError && <div className="error-message" role="alert">{authError}</div>}
         {successMessage && <div className="success-message" role="status">{successMessage}</div>}
         {productSaveWarning && <div className="error-message" role="alert">{productSaveWarning}</div>}
         {movementRefreshWarning && <div className="error-message" role="alert">{movementRefreshWarning}</div>}
@@ -1259,9 +1360,10 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
         )}
 
         {activePage === 'stock' && <StockManagement products={products} movementForm={movementForm} setMovementForm={setMovementForm} errors={movementErrors} submitting={movementSubmitting} onSubmit={handleMovementSubmit} movements={stockMovements} />}
-        {activePage === 'categories' && <CategoryManagement categories={visibleCategories} search={categorySearch} setSearch={setCategorySearch} form={categoryForm} setForm={setCategoryForm} errors={categoryErrors} editingCategory={editingCategory} onSubmit={submitCategory} onEdit={editCategory} onDelete={deleteCategory} onCancel={resetCategoryForm} />}
-        {activePage === 'suppliers' && <SupplierManagement suppliers={visibleSuppliers} products={products} categories={categoryOptions} search={supplierSearch} setSearch={setSupplierSearch} form={supplierForm} setForm={setSupplierForm} errors={supplierErrors} editingSupplier={editingSupplier} selectedSupplier={selectedSupplier} onSelect={(supplier) => supplier ? navigateSupplierRoute(supplier.id, 'view') : clearSupplierRoute()} showForm={showSupplierForm} onAdd={() => openSupplierForm()} onEdit={(supplier) => navigateSupplierRoute(supplier.id, 'edit')} onDelete={deleteSupplier} onSubmit={submitSupplier} onCancel={closeSupplierForm} />}
-        {isPurchaseOrders && <PurchaseOrderManagement orders={visiblePurchaseOrders} allOrders={purchaseOrders} products={products} suppliers={suppliers} search={purchaseOrderSearch} setSearch={setPurchaseOrderSearch} statusFilter={purchaseOrderStatusFilter} setStatusFilter={setPurchaseOrderStatusFilter} form={purchaseOrderForm} setForm={setPurchaseOrderForm} errors={purchaseOrderErrors} editingOrder={editingPurchaseOrder} selectedOrder={selectedPurchaseOrder} showForm={showPurchaseOrderForm} receiveForm={receiveForm} setReceiveForm={setReceiveForm} receiveErrors={receiveErrors} receiveSubmitting={receiveSubmitting} onAdd={() => openPurchaseOrderForm()} onEdit={openPurchaseOrderForm} onSelect={setSelectedPurchaseOrder} onSubmit={submitPurchaseOrder} onCancel={closePurchaseOrderForm} onPlace={(order) => updatePurchaseOrderStatus(order, 'Ordered')} onCancelOrder={(order) => updatePurchaseOrderStatus(order, 'Cancelled')} onReceive={openReceiveForm} onReceiveSubmit={submitReceipt} onReceiveCancel={() => { setReceiveForm(null); setReceiveErrors({}) }} />}
+        {activePage === 'categories' && <CategoryManagement categories={visibleCategories} search={categorySearch} setSearch={setCategorySearch} form={categoryForm} setForm={setCategoryForm} errors={categoryErrors} editingCategory={editingCategory} formRef={categoryFormRef} onSubmit={submitCategory} onEdit={editCategory} onDelete={deleteCategory} onCancel={resetCategoryForm} />}
+        {activePage === 'suppliers' && <SupplierManagement suppliers={visibleSuppliers} products={products} categories={categoryOptions} search={supplierSearch} setSearch={setSupplierSearch} errors={supplierErrors} loading={suppliersLoading} loadError={supplierLoadError} form={supplierForm} setForm={setSupplierForm} editingSupplier={editingSupplier} selectedSupplier={selectedSupplier} formRef={supplierFormRef} detailsRef={supplierDetailsRef} onSelect={(supplier) => supplier ? navigateSupplierRoute(supplier.id, 'view') : clearSupplierRoute()} showForm={showSupplierForm} onAdd={() => openSupplierForm()} onEdit={(supplier) => navigateSupplierRoute(supplier.id, 'edit')} onDelete={deleteSupplier} onSubmit={submitSupplier} onCancel={closeSupplierForm} />}
+        {activePage === 'settings' && <SettingsPage user={user} settings={settings} storageError={settingsStorageError} onSaveSettings={saveSettings} onUpdateProfile={onUpdateProfile} />}
+        {isPurchaseOrders && <PurchaseOrderManagement orders={visiblePurchaseOrders} allOrders={purchaseOrders} products={products} suppliers={suppliers} search={purchaseOrderSearch} setSearch={setPurchaseOrderSearch} statusFilter={purchaseOrderStatusFilter} setStatusFilter={setPurchaseOrderStatusFilter} form={purchaseOrderForm} setForm={setPurchaseOrderForm} errors={purchaseOrderErrors} editingOrder={editingPurchaseOrder} selectedOrder={selectedPurchaseOrder} showForm={showPurchaseOrderForm} formRef={purchaseOrderFormRef} detailsRef={purchaseOrderDetailsRef} receiveForm={receiveForm} setReceiveForm={setReceiveForm} receiveErrors={receiveErrors} receiveSubmitting={receiveSubmitting} onAdd={() => openPurchaseOrderForm()} onEdit={openPurchaseOrderForm} onSelect={(order) => order ? openPurchaseOrderDetails(order) : setSelectedPurchaseOrder(null)} onSubmit={submitPurchaseOrder} onCancel={closePurchaseOrderForm} onPlace={(order) => updatePurchaseOrderStatus(order, 'Ordered')} onCancelOrder={(order) => updatePurchaseOrderStatus(order, 'Cancelled')} onReceive={openReceiveForm} onReceiveSubmit={submitReceipt} onReceiveCancel={() => { setReceiveForm(null); setReceiveErrors({}) }} />}
         {isReports && <Reports
           products={products}
           categories={categoryRecords}
@@ -1280,6 +1382,7 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
           orders={purchaseOrders}
           movements={stockMovements}
           suppliers={suppliers}
+          notificationPreferences={settings.notifications}
           reorderQuantities={reorderQuantities}
           setReorderQuantities={setReorderQuantities}
           reorderSuppliers={reorderSuppliers}
@@ -1297,7 +1400,7 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
           onCreateOrder={openPurchaseOrderFromRecommendation}
         />}
 
-        {!isDashboard && !isProducts && activePage !== 'stock' && activePage !== 'categories' && activePage !== 'suppliers' && !isPurchaseOrders && !isReports && !isNotifications && <section className="planned-card"><span className="planned-icon">◌</span><h2>{activeItem.label} is planned</h2><p>This navigation item is visible for the future Inventra roadmap. It will become functional in a later implementation phase.</p></section>}
+        {!isDashboard && !isProducts && activePage !== 'stock' && activePage !== 'categories' && activePage !== 'suppliers' && activePage !== 'settings' && !isPurchaseOrders && !isReports && !isNotifications && <section className="planned-card"><span className="planned-icon">◌</span><h2>{activeItem.label} is planned</h2><p>This navigation item is visible for the future Inventra roadmap. It will become functional in a later implementation phase.</p></section>}
         <footer>Built with React · Demo data only</footer>
       </main>
     </div>
@@ -1305,6 +1408,112 @@ const [productRoute, setProductRoute] = useState(() => getProductRoute())
 }
 
 export default InventoryApp
+
+function SettingsPage({ user, settings, storageError, onSaveSettings, onUpdateProfile }) {
+  const [fullName, setFullName] = useState(user.user_metadata?.full_name || '')
+  const [profileError, setProfileError] = useState('')
+  const [profileMessage, setProfileMessage] = useState('')
+  const [profileSaving, setProfileSaving] = useState(false)
+  const [draftSettings, setDraftSettings] = useState(settings)
+  const [settingsError, setSettingsError] = useState('')
+  const [settingsMessage, setSettingsMessage] = useState('')
+
+  async function submitProfile(event) {
+    event.preventDefault()
+    const name = fullName.trim()
+    if (!name) {
+      setProfileError('Enter a display name.')
+      return
+    }
+    if (name.length > 80) {
+      setProfileError('Display name must be 80 characters or fewer.')
+      return
+    }
+    setProfileSaving(true)
+    setProfileError('')
+    setProfileMessage('')
+    try {
+      const updatedUser = await onUpdateProfile(name)
+      setFullName(updatedUser.user_metadata?.full_name || name)
+      setProfileMessage('Profile name updated in your Supabase Auth account.')
+    } catch (error) {
+      setProfileError(error instanceof Error ? error.message : 'Unable to update your profile.')
+    } finally {
+      setProfileSaving(false)
+    }
+  }
+
+  function updateNotificationPreference(preference, enabled) {
+    setDraftSettings((current) => ({
+      ...current,
+      notifications: { ...current.notifications, [preference]: enabled },
+    }))
+    setSettingsError('')
+    setSettingsMessage('')
+  }
+
+  function submitPreferences(event) {
+    event.preventDefault()
+    const threshold = draftSettings.inventory.defaultReorderThreshold
+    if (!Number.isSafeInteger(threshold) || threshold < 0 || threshold > 2147483647) {
+      setSettingsError('Enter a whole-number reorder threshold between 0 and 2,147,483,647.')
+      return
+    }
+    try {
+      onSaveSettings(draftSettings)
+      setSettingsError('')
+      setSettingsMessage('Preferences saved in this browser for this account.')
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : 'Unable to save these preferences.')
+      setSettingsMessage('')
+    }
+  }
+
+  return <section className="settings-page">
+    <section className="table-card settings-card">
+      <div className="section-heading"><div><h2>Account profile</h2><p>Your display name is saved to your Supabase Auth profile. Email remains hidden in the workspace.</p></div></div>
+      <form className="settings-profile-form" onSubmit={submitProfile} noValidate>
+        <label htmlFor="settings-full-name">Display name<input id="settings-full-name" value={fullName} onChange={(event) => setFullName(event.target.value)} maxLength="80" autoComplete="name" /></label>
+        {profileError && <p className="field-error form-wide" role="alert">{profileError}</p>}
+        {profileMessage && <p className="settings-saved form-wide" role="status">{profileMessage}</p>}
+        <div className="form-actions"><button className="primary-button" type="submit" disabled={profileSaving}>{profileSaving ? 'Saving…' : 'Save profile'}</button></div>
+      </form>
+    </section>
+
+    <form className="table-card settings-card settings-preferences" onSubmit={submitPreferences}>
+      <div className="section-heading"><div><h2>Notification preferences</h2><p>Choose which event types appear in the in-app Notifications page. These preferences are saved only in this browser.</p></div></div>
+      <div className="settings-options">
+        <label className="settings-option"><input type="checkbox" checked={draftSettings.notifications.lowStock} onChange={(event) => updateNotificationPreference('lowStock', event.target.checked)} /><span><strong>Low-stock alerts</strong><small>Show products at or below their reorder threshold.</small></span></label>
+        <label className="settings-option"><input type="checkbox" checked={draftSettings.notifications.outOfStock} onChange={(event) => updateNotificationPreference('outOfStock', event.target.checked)} /><span><strong>Out-of-stock alerts</strong><small>Show products with no available quantity.</small></span></label>
+        <label className="settings-option"><input type="checkbox" checked={draftSettings.notifications.stockMovements} onChange={(event) => updateNotificationPreference('stockMovements', event.target.checked)} /><span><strong>Stock movement activity</strong><small>Show recorded stock-in and stock-out events.</small></span></label>
+        <label className="settings-option"><input type="checkbox" checked={draftSettings.notifications.purchaseOrders} onChange={(event) => updateNotificationPreference('purchaseOrders', event.target.checked)} /><span><strong>Purchase-order activity</strong><small>Show order creation, updates, and receiving events.</small></span></label>
+      </div>
+      <div className="settings-inventory">
+        <h3>Inventory defaults</h3>
+        <p>These browser-only defaults are used when starting a new product form. Existing products are not changed.</p>
+        <label htmlFor="settings-reorder-threshold">Default reorder threshold<input id="settings-reorder-threshold" type="number" min="0" max="2147483647" step="1" value={draftSettings.inventory.defaultReorderThreshold} onChange={(event) => {
+          const value = event.target.value
+          setDraftSettings((current) => ({
+            ...current,
+            inventory: { ...current.inventory, defaultReorderThreshold: value === '' ? '' : Number(value) },
+          }))
+          setSettingsError('')
+          setSettingsMessage('')
+        }} /></label>
+        <label htmlFor="settings-default-department">Default department<select id="settings-default-department" value={draftSettings.inventory.defaultDepartment} onChange={(event) => {
+          setDraftSettings((current) => ({
+            ...current,
+            inventory: { ...current.inventory, defaultDepartment: event.target.value },
+          }))
+          setSettingsMessage('')
+        }}>{departments.map((department) => <option key={department}>{department}</option>)}</select></label>
+      </div>
+      {(storageError || settingsError) && <p className="field-error form-wide" role="alert">{settingsError || storageError}</p>}
+      {settingsMessage && <p className="settings-saved form-wide" role="status">{settingsMessage}</p>}
+      <div className="form-actions"><button className="primary-button" type="submit">Save browser preferences</button></div>
+    </form>
+  </section>
+}
 
 function Dashboard({
   products,
@@ -1539,6 +1748,7 @@ function NotificationsPage({
   orders,
   movements,
   suppliers,
+  notificationPreferences,
   reorderQuantities,
   setReorderQuantities,
   reorderSuppliers,
@@ -1574,6 +1784,13 @@ function NotificationsPage({
   const mergedNotificationState = mergeNotificationState(notificationState, sourceNotifications)
   const notifications = mergedNotificationState.notifications
     .filter((notification) => !mergedNotificationState.deletedIds.includes(notification.id))
+    .filter((notification) => {
+      if (notification.type === 'low-stock') return notificationPreferences.lowStock
+      if (notification.type === 'out-of-stock') return notificationPreferences.outOfStock
+      if (notification.type === 'stock-received' || notification.type === 'stock-issued') return notificationPreferences.stockMovements
+      if (notification.type.startsWith('purchase-order-')) return notificationPreferences.purchaseOrders
+      return true
+    })
     .sort((first, second) => {
       const firstDate = Date.parse(first.timestamp || '')
       const secondDate = Date.parse(second.timestamp || '')
@@ -1760,10 +1977,10 @@ function StockManagement({ products, movementForm, setMovementForm, errors, subm
   )
 }
 
-function CategoryManagement({ categories, search, setSearch, form, setForm, errors, editingCategory, onSubmit, onEdit, onDelete, onCancel }) {
+function CategoryManagement({ categories, search, setSearch, form, setForm, errors, editingCategory, formRef, onSubmit, onEdit, onDelete, onCancel }) {
   return (
     <section className="category-page">
-      <section className="form-card category-form-card">
+      <section className="form-card category-form-card" ref={formRef}>
         <div className="section-heading"><div><h2>{editingCategory ? 'Edit category' : 'Add category'}</h2><p>Keep category names clear and reusable across products.</p></div></div>
         <form onSubmit={onSubmit} noValidate>
           <FormField id="category-name" label="Category name *" value={form.name} onChange={(value) => setForm((current) => ({ ...current, name: value }))} error={errors.name} placeholder="e.g. IT Equipment" />
@@ -2182,7 +2399,7 @@ function ReportTable({ headers, rows, emptyMessage, className = '' }) {
   return <div className={`table-scroll ${className}`}><table><thead><tr>{headers.map((header) => <th key={header}>{header}</th>)}</tr></thead><tbody>{rows.map((row, index) => <tr key={index}>{row.map((cell, cellIndex) => <td className={cellIndex === 0 ? 'product-name' : ''} key={cellIndex}>{cell}</td>)}</tr>)}{rows.length === 0 && <tr><td colSpan={headers.length}><EmptyState message={emptyMessage} /></td></tr>}</tbody></table></div>
 }
 
-function PurchaseOrderManagement({ orders, allOrders, products, suppliers, search, setSearch, statusFilter, setStatusFilter, form, setForm, errors, editingOrder, selectedOrder, showForm, receiveForm, setReceiveForm, receiveErrors, receiveSubmitting, onAdd, onEdit, onSelect, onSubmit, onCancel, onPlace, onCancelOrder, onReceive, onReceiveSubmit, onReceiveCancel }) {
+function PurchaseOrderManagement({ orders, allOrders, products, suppliers, search, setSearch, statusFilter, setStatusFilter, form, setForm, errors, editingOrder, selectedOrder, showForm, formRef, detailsRef, receiveForm, setReceiveForm, receiveErrors, receiveSubmitting, onAdd, onEdit, onSelect, onSubmit, onCancel, onPlace, onCancelOrder, onReceive, onReceiveSubmit, onReceiveCancel }) {
   const draftCount = allOrders.filter((order) => order.status === 'Draft').length
   const awaitingCount = allOrders.filter((order) => order.status === 'Ordered' || order.status === 'Partially Received').length
   const receivedCount = allOrders.filter((order) => order.status === 'Received').length
@@ -2194,9 +2411,9 @@ function PurchaseOrderManagement({ orders, allOrders, products, suppliers, searc
         <StatCard icon="⇄" color="blue" label="Awaiting Receipt" value={awaitingCount} detail="Ordered or partially received" />
         <StatCard icon="✓" color="green" label="Fully Received" value={receivedCount} detail="All quantities received" />
       </section>
-      {showForm && <PurchaseOrderForm products={products} suppliers={suppliers} form={form} setForm={setForm} errors={errors} editingOrder={editingOrder} onSubmit={onSubmit} onCancel={onCancel} />}
+      {showForm && <PurchaseOrderForm products={products} suppliers={suppliers} form={form} setForm={setForm} errors={errors} editingOrder={editingOrder} formRef={formRef} onSubmit={onSubmit} onCancel={onCancel} />}
       {receiveForm && <ReceiveItemsForm receiveForm={receiveForm} setReceiveForm={setReceiveForm} errors={receiveErrors} submitting={receiveSubmitting} onSubmit={onReceiveSubmit} onCancel={onReceiveCancel} />}
-      {selectedOrder && <PurchaseOrderDetails order={selectedOrder} onClose={() => onSelect(null)} onEdit={() => onEdit(selectedOrder)} onPlace={() => onPlace(selectedOrder)} onCancelOrder={() => onCancelOrder(selectedOrder)} onReceive={() => onReceive(selectedOrder)} />}
+      {selectedOrder && <PurchaseOrderDetails order={selectedOrder} detailsRef={detailsRef} onClose={() => onSelect(null)} onEdit={() => onEdit(selectedOrder)} onPlace={() => onPlace(selectedOrder)} onCancelOrder={() => onCancelOrder(selectedOrder)} onReceive={() => onReceive(selectedOrder)} />}
       <section className="table-card purchase-order-list-card">
         <div className="table-heading"><div><h2>Purchase orders</h2><p>Temporary demonstration records reset on refresh.</p></div><div className="po-heading-actions"><input className="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search order or supplier..." aria-label="Search purchase orders" /><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} aria-label="Filter purchase orders by status"><option value="all">All statuses</option>{['Draft', 'Ordered', 'Partially Received', 'Received', 'Cancelled'].map((status) => <option key={status}>{status}</option>)}</select><button className="primary-button" onClick={onAdd}>+ New Order</button></div></div>
         <div className="table-scroll"><table><thead><tr><th>ORDER NUMBER</th><th>SUPPLIER</th><th>ORDER DATE</th><th>EXPECTED</th><th>TOTAL</th><th>STATUS</th><th>ACTION</th></tr></thead><tbody>{orders.map((order) => <tr key={order.id}><td className="product-name">{order.orderNumber}</td><td className="long-cell">{order.supplierName}</td><td>{formatDate(order.orderDate)}</td><td>{order.expectedDelivery ? formatDate(order.expectedDelivery) : 'Not specified'}</td><td>{formatCurrency(getPurchaseOrderTotal(order))}</td><td><span className={`po-status po-${normalizeText(order.status).replaceAll(' ', '-')}`}>{order.status}</span></td><td><div className="table-actions"><button className="table-action" onClick={() => onSelect(order)}>View</button>{order.status === 'Draft' && <><button className="table-action" onClick={() => onEdit(order)}>Edit</button><button className="table-action" onClick={() => onPlace(order)}>Place</button><button className="delete-button" onClick={() => onCancelOrder(order)}>Cancel</button></>}{(order.status === 'Ordered' || order.status === 'Partially Received') && <button className="table-action" onClick={() => onReceive(order)}>Receive</button>}</div></td></tr>)}{orders.length === 0 && <tr><td colSpan="7"><EmptyState message="No purchase orders match your search or status filter." /></td></tr>}</tbody></table></div>
@@ -2205,7 +2422,7 @@ function PurchaseOrderManagement({ orders, allOrders, products, suppliers, searc
   )
 }
 
-function PurchaseOrderForm({ products, suppliers, form, setForm, errors, editingOrder, onSubmit, onCancel }) {
+function PurchaseOrderForm({ products, suppliers, form, setForm, errors, editingOrder, formRef, onSubmit, onCancel }) {
   function updateField(field, value) {
     setForm((current) => ({ ...current, [field]: value }))
   }
@@ -2219,7 +2436,7 @@ function PurchaseOrderForm({ products, suppliers, form, setForm, errors, editing
     setForm((current) => ({ ...current, lines: current.lines.filter((_, lineIndex) => lineIndex !== index) }))
   }
   const total = form.lines.reduce((sum, line) => sum + (Number(line.orderedQuantity) || 0) * (Number(line.unitCost) || 0), 0)
-  return <section className="form-card purchase-order-form-card"><div className="section-heading"><div><h2>{editingOrder ? `Edit ${editingOrder.orderNumber}` : 'Create purchase order'}</h2><p>{editingOrder ? 'Only draft orders can be edited.' : 'New orders start as drafts. No stock changes occur until receiving.'}</p></div></div>{errors.form && <p className="field-error form-message">{errors.form}</p>}<form onSubmit={onSubmit} noValidate>
+  return <section className="form-card purchase-order-form-card" ref={formRef}><div className="section-heading"><div><h2>{editingOrder ? `Edit ${editingOrder.orderNumber}` : 'Create purchase order'}</h2><p>{editingOrder ? 'Only draft orders can be edited.' : 'New orders start as drafts. No stock changes occur until receiving.'}</p></div></div>{errors.form && <p className="field-error form-message">{errors.form}</p>}<form onSubmit={onSubmit} noValidate>
     <label htmlFor="po-supplier">Supplier *<select id="po-supplier" value={form.supplierId} onChange={(event) => updateField('supplierId', event.target.value)} aria-invalid={Boolean(errors.supplierId)}><option value="">Select a supplier</option>{suppliers.map((supplier) => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}</select>{errors.supplierId && <span className="field-error">{errors.supplierId}</span>}{suppliers.length === 0 && <span className="field-helper">Add a supplier before creating an order.</span>}</label>
     <label htmlFor="po-expected">Expected delivery date<input id="po-expected" type="date" value={form.expectedDelivery} onChange={(event) => updateField('expectedDelivery', event.target.value)} /></label>
     <div className="form-wide po-lines"><h3>Order lines</h3>{form.lines.map((line, index) => <div className="po-line" key={`${index}-${line.productId}`}><label htmlFor={`po-product-${index}`}>Product *<select id={`po-product-${index}`} value={line.productId} onChange={(event) => updateLine(index, 'productId', event.target.value)} aria-invalid={Boolean(errors[`product-${index}`])}><option value="">Select a product</option>{products.map((product) => <option key={product.id} value={product.id}>{product.name} ({product.sku})</option>)}</select>{errors[`product-${index}`] && <span className="field-error">{errors[`product-${index}`]}</span>}</label><FormField id={`po-quantity-${index}`} label="Ordered quantity *" type="number" min="1" step="1" value={line.orderedQuantity} onChange={(value) => updateLine(index, 'orderedQuantity', value)} error={errors[`quantity-${index}`]} placeholder="0" /><FormField id={`po-cost-${index}`} label="Unit cost (৳) *" type="number" min="0" step="0.01" value={line.unitCost} onChange={(value) => updateLine(index, 'unitCost', value)} error={errors[`cost-${index}`]} placeholder="0.00" />{form.lines.length > 1 && <button type="button" className="delete-button po-remove-line" onClick={() => removeLine(index)}>Remove</button>}</div>)}<button type="button" className="secondary-button" onClick={addLine}>+ Add line</button><strong className="po-form-total">Order total: {formatCurrency(total)}</strong></div>
@@ -2235,27 +2452,28 @@ function ReceiveItemsForm({ receiveForm, setReceiveForm, errors, submitting, onS
   return <section className="form-card receive-form-card"><div className="section-heading"><div><h2>Receive items · {receiveForm.order.orderNumber}</h2><p>Enter only the quantities received in this delivery. Stock updates once on successful submission.</p></div></div>{errors.form && <p className="field-error form-message">{errors.form}</p>}<form onSubmit={onSubmit} noValidate><div className="form-wide"><div className="receive-lines">{receiveForm.order.lines.map((line, index) => { const outstanding = line.orderedQuantity - line.receivedQuantity; return <div className="receive-line" key={line.productId}><div><strong>{line.productName}</strong><small>{line.sku} · Ordered {line.orderedQuantity} · Received {line.receivedQuantity} · Outstanding {outstanding}</small></div><FormField id={`receive-${index}`} label="Newly received" type="number" min="0" step="1" value={receiveForm.lines[index].quantity} onChange={(value) => updateQuantity(index, value)} error={errors[`quantity-${index}`]} placeholder="0" /></div> })}</div></div><div className="form-actions"><button type="button" className="secondary-button" onClick={onCancel}>Cancel</button><button type="submit" className="primary-button" disabled={submitting}>{submitting ? 'Recording...' : 'Record Receipt'}</button></div></form></section>
 }
 
-function PurchaseOrderDetails({ order, onClose, onEdit, onPlace, onCancelOrder, onReceive }) {
-  return <section className="details-card purchase-order-details"><div className="details-header"><div><p className="eyebrow">PURCHASE ORDER DETAILS</p><h2>{order.orderNumber}</h2><span className={`po-status po-${normalizeText(order.status).replaceAll(' ', '-')}`}>{order.status}</span></div><button className="close-button" aria-label="Close purchase order details" onClick={onClose}>×</button></div><p className="po-detail-meta">Supplier: <strong>{order.supplierName}</strong> · Ordered {formatDate(order.orderDate)} · Expected {order.expectedDelivery ? formatDate(order.expectedDelivery) : 'Not specified'}</p><div className="table-scroll"><table><thead><tr><th>PRODUCT</th><th>SKU</th><th>ORDERED</th><th>RECEIVED</th><th>OUTSTANDING</th><th>UNIT COST</th><th>LINE TOTAL</th></tr></thead><tbody>{order.lines.map((line) => <tr key={line.productId}><td className="product-name">{line.productName}</td><td>{line.sku}</td><td>{line.orderedQuantity}</td><td>{line.receivedQuantity}</td><td>{line.orderedQuantity - line.receivedQuantity}</td><td>{formatCurrency(line.unitCost)}</td><td>{formatCurrency(line.lineTotal)}</td></tr>)}</tbody></table></div><p className="po-total">Order total: <strong>{formatCurrency(getPurchaseOrderTotal(order))}</strong></p><p className="details-description">{order.notes || 'No notes provided.'}</p>{order.receivingHistory.length > 0 && <div className="po-history"><strong>Receiving history</strong>{order.receivingHistory.map((receipt) => <small key={receipt.id}>{formatMovementDate(receipt.date)} · {receipt.totalQuantity} unit(s) received</small>)}</div>}<div className="details-actions">{order.status === 'Draft' && <><button className="secondary-button" onClick={onCancelOrder}>Cancel order</button><button className="secondary-button" onClick={onEdit}>Edit order</button><button className="primary-button" onClick={onPlace}>Place order</button></>}{(order.status === 'Ordered' || order.status === 'Partially Received') && <button className="primary-button" onClick={onReceive}>Receive items</button>}</div></section>
+function PurchaseOrderDetails({ order, detailsRef, onClose, onEdit, onPlace, onCancelOrder, onReceive }) {
+  return <section className="details-card purchase-order-details" ref={detailsRef}><div className="details-header"><div><p className="eyebrow">PURCHASE ORDER DETAILS</p><h2>{order.orderNumber}</h2><span className={`po-status po-${normalizeText(order.status).replaceAll(' ', '-')}`}>{order.status}</span></div><button className="close-button" aria-label="Close purchase order details" onClick={onClose}>×</button></div><p className="po-detail-meta">Supplier: <strong>{order.supplierName}</strong> · Ordered {formatDate(order.orderDate)} · Expected {order.expectedDelivery ? formatDate(order.expectedDelivery) : 'Not specified'}</p><div className="table-scroll"><table><thead><tr><th>PRODUCT</th><th>SKU</th><th>ORDERED</th><th>RECEIVED</th><th>OUTSTANDING</th><th>UNIT COST</th><th>LINE TOTAL</th></tr></thead><tbody>{order.lines.map((line) => <tr key={line.productId}><td className="product-name">{line.productName}</td><td>{line.sku}</td><td>{line.orderedQuantity}</td><td>{line.receivedQuantity}</td><td>{line.orderedQuantity - line.receivedQuantity}</td><td>{formatCurrency(line.unitCost)}</td><td>{formatCurrency(line.lineTotal)}</td></tr>)}</tbody></table></div><p className="po-total">Order total: <strong>{formatCurrency(getPurchaseOrderTotal(order))}</strong></p><p className="details-description">{order.notes || 'No notes provided.'}</p>{order.receivingHistory.length > 0 && <div className="po-history"><strong>Receiving history</strong>{order.receivingHistory.map((receipt) => <small key={receipt.id}>{formatMovementDate(receipt.date)} · {receipt.totalQuantity} unit(s) received</small>)}</div>}<div className="details-actions">{order.status === 'Draft' && <><button className="secondary-button" onClick={onCancelOrder}>Cancel order</button><button className="secondary-button" onClick={onEdit}>Edit order</button><button className="primary-button" onClick={onPlace}>Place order</button></>}{(order.status === 'Ordered' || order.status === 'Partially Received') && <button className="primary-button" onClick={onReceive}>Receive items</button>}</div></section>
 }
 
-function SupplierManagement({ suppliers, products, categories, search, setSearch, form, setForm, errors, editingSupplier, selectedSupplier, onSelect, showForm, onAdd, onEdit, onDelete, onSubmit, onCancel }) {
+function SupplierManagement({ suppliers, products, categories, search, setSearch, form, setForm, errors, loading, loadError, editingSupplier, selectedSupplier, formRef, detailsRef, onSelect, showForm, onAdd, onEdit, onDelete, onSubmit, onCancel }) {
   const selectedProductCount = selectedSupplier
     ? products.filter((product) => normalizeText(product.supplier) === normalizeText(selectedSupplier.name)).length
     : 0
   return (
     <section className="supplier-page">
-      {showForm && <SupplierForm categories={categories} form={form} setForm={setForm} errors={errors} editingSupplier={editingSupplier} onSubmit={onSubmit} onCancel={onCancel} />}
-      {selectedSupplier && <SupplierDetails supplier={selectedSupplier} productCount={selectedProductCount} onClose={() => onSelect(null)} onEdit={() => onEdit(selectedSupplier)} onDelete={() => onDelete(selectedSupplier)} />}
+      {showForm && <SupplierForm categories={categories} form={form} setForm={setForm} errors={errors} editingSupplier={editingSupplier} formRef={formRef} onSubmit={onSubmit} onCancel={onCancel} />}
+      {selectedSupplier && <SupplierDetails supplier={selectedSupplier} productCount={selectedProductCount} detailsRef={detailsRef} onClose={() => onSelect(null)} onEdit={() => onEdit(selectedSupplier)} onDelete={() => onDelete(selectedSupplier)} />}
       <section className="table-card supplier-list-card">
         <div className="table-heading"><div><h2>Supplier directory</h2><p>{suppliers.length} supplier{suppliers.length === 1 ? '' : 's'} available for inventory.</p></div><div className="supplier-heading-actions"><input className="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search suppliers..." aria-label="Search suppliers" /><button className="primary-button" onClick={onAdd}>+ Add Supplier</button></div></div>
-        <div className="table-scroll"><table><thead><tr><th>SUPPLIER</th><th>CONTACT PERSON</th><th>PHONE</th><th>EMAIL</th><th>CATEGORIES</th><th>ACTION</th></tr></thead><tbody>{suppliers.map((supplier) => <tr key={supplier.id}><td className="product-name">{supplier.name}</td><td>{supplier.contactPerson || 'Not specified'}</td><td>{supplier.phone || 'Not specified'}</td><td className="long-cell">{supplier.email || 'Not specified'}</td><td className="category-description">{supplier.categories.length ? supplier.categories.join(', ') : 'Not specified'}</td><td><div className="table-actions"><button className="table-action" onClick={() => onSelect(supplier)}>View</button><button className="table-action" onClick={() => onEdit(supplier)}>Edit</button><button className="delete-button" onClick={() => onDelete(supplier)}>Delete</button></div></td></tr>)}{suppliers.length === 0 && <tr><td colSpan="6"><EmptyState message="No suppliers match your search." /></td></tr>}</tbody></table></div>
+        {loadError && <p className="field-error supplier-load-error" role="alert">Unable to load suppliers: {loadError}</p>}
+        <div className="table-scroll"><table><thead><tr><th>SUPPLIER</th><th>CONTACT PERSON</th><th>PHONE</th><th>EMAIL</th><th>CATEGORIES</th><th>ACTION</th></tr></thead><tbody>{suppliers.map((supplier) => <tr key={supplier.id}><td className="product-name">{supplier.name}</td><td>{supplier.contactPerson || 'Not specified'}</td><td>{supplier.phone || 'Not specified'}</td><td className="long-cell">{supplier.email || 'Not specified'}</td><td className="category-description">{supplier.categories.length ? supplier.categories.join(', ') : 'Not specified'}</td><td><div className="table-actions"><button className="table-action" type="button" onClick={() => onSelect(supplier)}>View</button><button className="table-action" type="button" onClick={() => onEdit(supplier)}>Edit</button><button className="delete-button" type="button" onClick={() => onDelete(supplier)}>Delete</button></div></td></tr>)}{loading && suppliers.length === 0 && <tr><td colSpan="6"><p className="field-helper" role="status">Loading suppliers…</p></td></tr>}{!loading && suppliers.length === 0 && <tr><td colSpan="6"><EmptyState message={search.trim() ? 'No suppliers match your search.' : 'No suppliers are available.'} /></td></tr>}</tbody></table></div>
       </section>
     </section>
   )
 }
 
-function SupplierForm({ categories, form, setForm, errors, editingSupplier, onSubmit, onCancel }) {
+function SupplierForm({ categories, form, setForm, errors, editingSupplier, formRef, onSubmit, onCancel }) {
   function updateField(field, value) {
     setForm((current) => ({ ...current, [field]: value }))
   }
@@ -2265,7 +2483,7 @@ function SupplierForm({ categories, form, setForm, errors, editingSupplier, onSu
       : [...form.categories, category]
     updateField('categories', nextCategories)
   }
-  return <section className="form-card supplier-form-card"><div className="section-heading"><div><h2>{editingSupplier ? 'Edit supplier' : 'Add supplier'}</h2><p>Supplier records are fictional demonstration data and reset on refresh.</p></div></div><form onSubmit={onSubmit} noValidate>
+  return <section className="form-card supplier-form-card" ref={formRef}><div className="section-heading"><div><h2>{editingSupplier ? 'Edit supplier' : 'Add supplier'}</h2><p>Supplier records are fictional demonstration data and reset on refresh.</p></div></div><form onSubmit={onSubmit} noValidate>
     <FormField id="supplier-name" label="Supplier name *" value={form.name} onChange={(value) => updateField('name', value)} error={errors.name} placeholder="e.g. Demo Technology Supplier" />
     <FormField id="supplier-contact" label="Contact person" value={form.contactPerson} onChange={(value) => updateField('contactPerson', value)} placeholder="Optional contact person" />
     <FormField id="supplier-phone" label="Phone number" value={form.phone} onChange={(value) => updateField('phone', value)} error={errors.phone} placeholder="Optional phone number" />
@@ -2277,8 +2495,8 @@ function SupplierForm({ categories, form, setForm, errors, editingSupplier, onSu
   </form></section>
 }
 
-function SupplierDetails({ supplier, productCount, onClose, onEdit, onDelete }) {
-  return <section className="details-card"><div className="details-header"><div><p className="eyebrow">SUPPLIER DETAILS</p><h2>{supplier.name}</h2></div><button className="close-button" aria-label="Close supplier details" onClick={onClose}>×</button></div><div className="details-grid supplier-details-grid"><DetailItem label="Contact person" value={supplier.contactPerson || 'Not specified'} /><DetailItem label="Phone" value={supplier.phone || 'Not specified'} /><DetailItem label="Email" value={supplier.email || 'Not specified'} /><DetailItem label="Categories" value={supplier.categories.length ? supplier.categories.join(', ') : 'Not specified'} /><DetailItem label="Created" value={formatDate(supplier.createdAt)} /><DetailItem label="Updated" value={formatDate(supplier.updatedAt)} /><DetailItem label="Assigned products" value={productCount} /><DetailItem label="Address" value={supplier.address || 'Not specified'} /><DetailItem label="Notes" value={supplier.notes || 'No notes provided.'} /></div><div className="details-actions"><button className="secondary-button" onClick={onDelete}>Delete supplier</button><button className="primary-button" onClick={onEdit}>Edit supplier</button></div></section>
+function SupplierDetails({ supplier, productCount, detailsRef, onClose, onEdit, onDelete }) {
+  return <section className="details-card supplier-details" ref={detailsRef}><div className="details-header"><div><p className="eyebrow">SUPPLIER DETAILS</p><h2>{supplier.name}</h2></div><button className="close-button" aria-label="Close supplier details" onClick={onClose}>×</button></div><div className="details-grid supplier-details-grid"><DetailItem label="Contact person" value={supplier.contactPerson || 'Not specified'} /><DetailItem label="Phone" value={supplier.phone || 'Not specified'} /><DetailItem label="Email" value={supplier.email || 'Not specified'} /><DetailItem label="Categories" value={supplier.categories.length ? supplier.categories.join(', ') : 'Not specified'} /><DetailItem label="Created" value={formatDate(supplier.createdAt)} /><DetailItem label="Updated" value={formatDate(supplier.updatedAt)} /><DetailItem label="Assigned products" value={productCount} /><DetailItem label="Address" value={supplier.address || 'Not specified'} /><DetailItem label="Notes" value={supplier.notes || 'No notes provided.'} /></div><div className="details-actions"><button className="secondary-button" onClick={onDelete}>Delete supplier</button><button className="primary-button" onClick={onEdit}>Edit supplier</button></div></section>
 }
 
 function ProductFilters({ categories, suppliers, search, setSearch, categoryFilter, setCategoryFilter, supplierFilter, setSupplierFilter, sortBy, sortDirection, onSort, onClear }) {

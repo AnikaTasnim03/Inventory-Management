@@ -6,7 +6,7 @@ Frontend (`frontend/.env` or deployment environment):
 
 - `VITE_API_URL`: HTTPS URL of the backend API, including `/api`.
 - `VITE_SUPABASE_URL`: public Supabase project URL.
-- `VITE_SUPABASE_ANON_KEY`: public Supabase anon/publishable key only.
+- `VITE_SUPABASE_ANON_KEY` or `VITE_SUPABASE_PUBLISHABLE_KEY`: public client key only.
 
 Backend (`backend/.env` or private deployment environment):
 
@@ -24,18 +24,22 @@ Never place `SUPABASE_SECRET_KEY` in frontend variables or browser code.
 2. Execute `20261029_purchase_order_receipts.sql`.
 3. Execute `20261029_atomic_stock_operations.sql`.
 4. Execute `20261029_user_profiles_roles.sql`.
-5. Insert the initial administrator's Auth UUID into `public.user_profiles` with role `admin`.
-6. Grant the two RPC functions only to the backend database role after confirming the role:
+5. Execute `20261031_auth_signup_profiles.sql` to create viewer profiles for new Auth users.
+6. Insert the initial administrator's Auth UUID into `public.user_profiles` with role `admin`.
+7. Grant the two RPC functions only to the backend database role after confirming the role:
    - `record_stock_movement(bigint, text, integer, text, text, text, text)`
    - `receive_purchase_order(bigint, jsonb, text)`
-7. Verify RLS is enabled on all migration-created tables and that no `anon` policy or function execution grant exists.
+8. Verify RLS is enabled on all migration-created tables and that no `anon` policy or function execution grant exists.
+
+The current inventory schema is shared: inventory records are not assigned to individual users or workspaces. Authenticated users with an active profile can read the shared workspace. New sign-ups receive the `viewer` role; only `admin` and `staff` profiles can change inventory. Promote users to `staff` or `admin` through a trusted administrator workflow, never from the browser.
 
 ## Supabase Auth settings
 
 - Configure the production frontend URL as an allowed redirect URL.
-- Disable open public registration unless the deployment explicitly needs it.
-- Use administrator-controlled Auth account creation for initial users.
+- Enable public registration only if self-service sign-up is intended for this deployment.
+- Create the initial administrator through the Supabase Auth administrator workflow, then add that user to `public.user_profiles`.
 - Confirm email verification and password recovery settings match the deployment policy.
+- Allow the frontend origin as a password-reset redirect URL.
 
 ## Application checks
 
